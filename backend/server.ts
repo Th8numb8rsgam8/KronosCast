@@ -1,9 +1,3 @@
-// require('dotenv').config();
-// const express = require('express');
-// const bcrypt = require('bcrypt');
-// const jwt = require('jsonwebtoken');
-// const { Pool } = require('pg');
-
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -11,6 +5,8 @@ import express, { Request, Response, Application } from 'express';
 import bcrypt from 'bcrypt';
 import jwt, { Secret, SignOptions, JwtPayload } from 'jsonwebtoken';
 import { Pool, PoolClient, DatabaseError } from 'pg';
+import mqtt from 'mqtt';
+import crypto from 'crypto';
 
 const app: Application = express();
 app.set('trust proxy', 'loopback'); // Trust the loopback interface for proxy headers
@@ -21,6 +17,8 @@ export interface UserRow {
   username: string;
   email: string;
   password_hash: string;
+  mqtt_username: string | null;
+  mqtt_password_hash: string | null;
   created_at: Date;
 }
 
@@ -45,6 +43,11 @@ interface SignupRequestBody {
   password?: string;
 }
 
+interface LoginRequestBody {
+  email?: string;
+  password?: string;
+}
+
 interface RequestSetupRequestBody {
   userId?: string;
   deviceName?: string;
@@ -56,11 +59,15 @@ interface VerifySetupRequestBody {
 
 // Regex Patterns
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-// Minimum 8 characters, at least 1 uppercase letter, 1 lowercase letter, 1 number, and 1 special character
 const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
 
 const JWT_SECRET: Secret = process.env.JWT_SECRET || 'default_jwt_secret_change_in_production';
+const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://localhost:1883';
+const MQTT_ADMIN_USER = process.env.MQTT_ADMIN_USER || 'admin';
+const MQTT_ADMIN_PASS = process.env.MQTT_ADMIN_PASS || 'backend_secret_password';
+
+// Public WebSocket endpoint returned to mobile app
+const MQTT_PUBLIC_WSS_URL = process.env.MQTT_PUBLIC_WSS_URL || 'wss://mqtt.yourdomain.com:8084/mqtt';
 
 const pool = new Pool({
   user: process.env.DB_USER,
@@ -81,6 +88,8 @@ async function initDb(): Promise<void> {
           username VARCHAR(50) UNIQUE NOT NULL,
           email VARCHAR(255) UNIQUE NOT NULL,
           password_hash VARCHAR(255) NOT NULL,
+          mqtt_username VARCHAR(100) UNIQUE,
+          mqtt_password_hash VARCHAR(255),
           created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
 
@@ -99,6 +108,100 @@ async function initDb(): Promise<void> {
 }
 
 initDb();
+
+// ----------------------------------------------------------------------------
+// MQTT ADMIN CLIENT & PROVISIONING SERVICE (DynSec Plugin)
+// ----------------------------------------------------------------------------
+const mqttAdminClient = mqtt.connect(MQTT_BROKER_URL, {
+  username: MQTT_ADMIN_USER,
+  password: MQTT_ADMIN_PASS,
+  reconnectPeriod: 5000,
+});
+
+mqttAdminClient.on('connect', () => {
+  console.log('Connected to Mosquitto MQTT Broker as Admin.');
+});
+
+mqttAdminClient.on('error', (err: Error) => {
+  console.error('Mosquitto Admin Connection Error:', err.message);
+});
+
+/**
+ * Provisions dynamic RBAC role and client credentials inside Mosquitto via $CONTROL/dynamic-security/v1
+ */
+async function provisionMqttUserInMosquitto(userId: string, rawMqttPassword: string): Promise<string> {
+  const mqttUsername = `user_${userId}`;
+  const roleName = `role_user_${userId}`;
+
+  // 1. Command to define strict role-based topic permissions for the user app
+  const createRoleCmd = {
+    commands: [
+      {
+        command: 'createRole',
+        rolename: roleName,
+        acls: [
+          {
+            acltype: 'subscribePattern',
+            topic: `users/${userId}/devices/+/telemetry`,
+            priority: 1,
+            allow: true
+          },
+          {
+            acltype: 'subscribePattern',
+            topic: `users/${userId}/devices/+/status`,
+            priority: 1,
+            allow: true
+          },
+          {
+            acltype: 'publishClientSend',
+            topic: `users/${userId}/devices/+/commands`,
+            priority: 1,
+            allow: true
+          }
+        ]
+      }
+    ]
+  };
+
+  // 2. Command to create the Mosquitto user account and attach the created role
+  const createClientCmd = {
+    commands: [
+      {
+        command: 'createClient',
+        username: mqttUsername,
+        password: rawMqttPassword,
+        roles: [
+          {
+            rolename: roleName,
+            priority: 1
+          }
+        ]
+      }
+    ]
+  };
+
+  // Publish configuration commands to Mosquitto's dynamic security control topic
+  mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(createRoleCmd));
+  mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(createClientCmd));
+
+  return mqttUsername;
+}
+
+/**
+ * Helper to construct the standard MQTT payload returned to the mobile client
+ */
+function buildMqttResponseObject(userId: string, mqttUsername: string, rawMqttPassword: string) {
+  return {
+    brokerUrl: MQTT_PUBLIC_WSS_URL,
+    username: mqttUsername,
+    password: rawMqttPassword,
+    topics: {
+      telemetrySubscribe: `users/${userId}/devices/+/telemetry`,
+      statusSubscribe: `users/${userId}/devices/+/status`,
+      commandPublish: `users/${userId}/devices/{deviceId}/commands`,
+    }
+  };
+}
 
 app.get(
   '/health', 
@@ -121,57 +224,166 @@ app.get(
 app.post(
   '/api/auth/signup', 
   async (req: Request<{}, {}, SignupRequestBody>, res: Response): Promise<Response> => {
-  const { username, email, password } = req.body;
+    const { username, email, password } = req.body;
 
-  if (!username || !email || !password) {
-    return res.status(400).json({ error: 'username, email and password are required' });
-  }
-
-  // 2. Validate Email Format
-  if (!EMAIL_REGEX.test(email)) {
-    return res.status(400).json({ error: 'Please enter a valid email address.' });
-  }
-
-  // 3. Validate Password Strength
-  if (!STRONG_PASSWORD_REGEX.test(password)) {
-    return res.status(400).json({
-      error: 'Password must be at least 8 characters long and contain an uppercase letter, lowercase letter, number, and special character.'
-    });
-  }
-
-  const client: PoolClient = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    // 2. Hash Password & Insert User
-    const passwordHash = await bcrypt.hash(password, 10);
-    const result = await client.query<{ id: string }>(
-      'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id',
-      [username, email.toLowerCase().trim(), passwordHash]
-    );
-
-    await client.query('COMMIT');
-
-    return res.status(201).json({
-      message: 'Signup successful',
-      user: {
-        id: result.rows[0].id,
-      },
-    });
-  } catch (err: unknown) {
-    await client.query('ROLLBACK');
-
-    // Catch unique violations (e.g., duplicate username or email)
-    if (err instanceof DatabaseError && err.code === '23505') {
-      return res.status(400).json({ error: 'Username or email is already registered.' });
+    if (!username || !email || !password) {
+      return res.status(400).json({ error: 'username, email and password are required' });
     }
 
-    return res.status(500).json({ error: 'Internal server error' });
-  } finally {
-    client.release();
+    // 2. Validate Email Format
+    if (!EMAIL_REGEX.test(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address.' });
+    }
+
+    // 3. Validate Password Strength
+    if (!STRONG_PASSWORD_REGEX.test(password)) {
+      return res.status(400).json({
+        error: 'Password must be at least 8 characters long and contain an uppercase letter, lowercase letter, number, and special character.'
+      });
+    }
+
+    const client: PoolClient = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // 2. Hash Password & Insert User
+      const passwordHash = await bcrypt.hash(password, 10);
+
+      // Insert new user into database
+      const userResult = await client.query<{ id: string; username: string; email: string }>(
+        'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email',
+        [username.trim(), email.toLowerCase().trim(), passwordHash]
+      );
+
+      const newUser = userResult.rows[0];
+
+      const rawMqttPassword = crypto.randomBytes(18).toString('hex');
+      const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
+
+      const mqttUsername = await provisionMqttUserInMosquitto(newUser.id, rawMqttPassword);
+
+      // Save generated MQTT credentials to PostgreSQL user record
+      await client.query(
+        'UPDATE users SET mqtt_username = $1, mqtt_password_hash = $2 WHERE id = $3',
+        [mqttUsername, mqttPasswordHash, newUser.id]
+      );
+
+      await client.query('COMMIT');
+
+      // Issue JWT authentication token for API access
+      const token = jwt.sign({ userId: newUser.id, email: newUser.email }, JWT_SECRET, { expiresIn: '7d' });
+
+      return res.status(201).json({
+        message: 'Signup successful',
+        user: newUser,
+        token,
+        mqtt: buildMqttResponseObject(newUser.id, mqttUsername, rawMqttPassword)
+      });
+    } catch (err: unknown) {
+      await client.query('ROLLBACK');
+
+      // Catch unique violations (e.g., duplicate username or email)
+      if (err instanceof DatabaseError && err.code === '23505') {
+        return res.status(400).json({ error: 'Username or email is already registered.' });
+      }
+
+      console.error('Signup Error:', err);
+      return res.status(500).json({ error: 'Internal server error during signup.' });
+    } finally {
+      client.release();
+    }
   }
-});
+);
+
+// ----------------------------------------------------------------------------
+// USER AUTHENTICATION: LOGIN
+// ----------------------------------------------------------------------------
+app.post(
+  '/api/auth/login',
+  async (req: Request<{}, {}, LoginRequestBody>, res: Response): Promise<Response> => {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required.' });
+    }
+
+    try {
+      // Fetch user record including MQTT fields
+      const result = await pool.query<UserRow>(
+        'SELECT id, username, email, password_hash, mqtt_username, mqtt_password_hash FROM users WHERE email = $1',
+        [email.toLowerCase().trim()]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(401).json({ error: 'Invalid email or password.' });
+      }
+
+      const user = result.rows[0];
+
+      // Validate password
+      const passwordMatch = await bcrypt.compare(password, user.password_hash);
+      if (!passwordMatch) {
+        return res.status(401).json({ error: 'Invalid email or password.' });
+      }
+
+      let rawMqttPassword: string;
+      let mqttUsername = user.mqtt_username;
+
+      // Lazy-provision MQTT credentials if user was registered prior to MQTT setup
+      if (!mqttUsername || !user.mqtt_password_hash) {
+        rawMqttPassword = crypto.randomBytes(18).toString('hex');
+        const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
+
+        mqttUsername = await provisionMqttUserInMosquitto(user.id, rawMqttPassword);
+
+        await pool.query(
+          'UPDATE users SET mqtt_username = $1, mqtt_password_hash = $2 WHERE id = $3',
+          [mqttUsername, mqttPasswordHash, user.id]
+        );
+      } else {
+        // Generate temporary session password or re-synchronize credential for active login session
+        rawMqttPassword = crypto.randomBytes(18).toString('hex');
+        const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
+
+        // Update password in Mosquitto via DynSec Admin Client
+        const updatePassCmd = {
+          commands: [
+            {
+              command: 'setClientPassword',
+              username: mqttUsername,
+              password: rawMqttPassword
+            }
+          ]
+        };
+        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(updatePassCmd));
+
+        // Sync new password hash into PostgreSQL
+        await pool.query(
+          'UPDATE users SET mqtt_password_hash = $1 WHERE id = $2',
+          [mqttPasswordHash, user.id]
+        );
+      }
+
+      // Generate API JWT
+      const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+
+      return res.status(200).json({
+        message: 'Login successful',
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+        },
+        token,
+        mqtt: buildMqttResponseObject(user.id, mqttUsername, rawMqttPassword)
+      });
+    } catch (err) {
+      console.error('Login Error:', err);
+      return res.status(500).json({ error: 'Internal server error during login.' });
+    }
+  }
+);
 
 // Step 1: Request JWT Setup Token
 app.post(

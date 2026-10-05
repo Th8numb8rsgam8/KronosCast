@@ -16,10 +16,27 @@ import {
 import { BleManager, Device, Subscription, BleError } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 
+export interface MqttCredentials {
+  brokerUrl: string;
+  username: string;
+  password: string;
+  topics: {
+    telemetrySbuscribe: string;
+    commandPublish: string;
+    statusSubscribe: string;
+  }
+}
+
 export interface User {
   id: string | number;
   username: string;
   email: string;
+}
+
+export interface AuthState {
+  user: User;
+  token?: string;
+  mqtt?: MqttCredentials;
 }
 
 export interface DeviceItem {
@@ -28,12 +45,12 @@ export interface DeviceItem {
   mqtt_topic: string;
 }
 
-interface SignupScreenProps {
-  onSignupSuccess: (user: User) => void;
+interface AuthScreenProps {
+  onAuthSuccess: (authData: AuthState) => void;
 }
 
 interface DeviceDashboardProps {
-  user: User;
+  authState: AuthState;
   onLogout: () => void;
 }
 
@@ -63,26 +80,34 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!\%*?&]{8,}$/;
 
 export default function App(): React.ReactElement {
-  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authState, setAuthState] = useState<AuthState | null>(null);
 
-  if (!currentUser) {
-    return <SignupScreen onSignupSuccess={(user: User) => setCurrentUser(user)} />;
+  if (!authState) {
+    return <AuthScreen onAuthSuccess={(data: AuthState) => setAuthState(data)} />;
   }
 
-  return <DeviceDashboard user={currentUser} onLogout={() => setCurrentUser(null)} />;
+  return <DeviceDashboard authState={authState} onLogout={() => setAuthState(null)} />;
 }
 
 // ----------------------------------------------------------------------------
-// SIGNUP SCREEN
+// COMBINED AUTH SCREEN (SIGNUP & LOGIN)
 // ----------------------------------------------------------------------------
-function SignupScreen({ onSignupSuccess }: SignupScreenProps): React.ReactElement {
+function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.ReactElement {
+  const [isLoginMode, setIsLoginMode] = useState<boolean>(true);
   const [username, setUsername] = useState<string>('');
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
 
-  const handleSignup = async (): Promise<void> => {
-    if (!username.trim() || !email || !password) {
+  const toggleAuthMode = () => {
+    setIsLoginMode((prev) => !prev);
+    setUsername('');
+    setEmail('');
+    setPassword('');
+  };
+
+  const handleAuthSubmit = async (): Promise<void> => {
+    if (!email || !password) {
       Alert.alert('Error', 'Please fill in all fields.');
       return;
     }
@@ -92,30 +117,47 @@ function SignupScreen({ onSignupSuccess }: SignupScreenProps): React.ReactElemen
       return;
     }
 
-    if (!STRONG_PASSWORD_REGEX.test(password)) {
-      Alert.alert(
-        'Validation Error',
-        'Password must be 8+ characters and contain uppercase, lowercase, number, & special character.'
-      );
-      return;
+    if (!isLoginMode){
+      if (!username.trim()) {
+        Alert.alert('Validation Error', 'Username is required for registration.');
+        return;
+      }
+
+      if (!STRONG_PASSWORD_REGEX.test(password)) {
+        Alert.alert(
+          'Validation Error',
+          'Password must be 8+ characters and contain uppercase, lowercase, number, & special character.'
+        );
+        return;
+      }
+
     }
 
     setLoading(true);
 
+    const endpoint = isLoginMode ? '/api/auth/login' : '/api/auth/signup';
+    const payload = isLoginMode ? { email, password } : { username, email, password };
+
     try {
-      const response = await fetch(`${BACKEND_URL}/api/auth/signup`, {
+      const response = await fetch(`${BACKEND_URL}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, email, password }),
+        body: JSON.stringify(payload),
       });
 
       const data = await response.json();
 
       if (response.ok) {
-        Alert.alert('Success', 'User created successfully!');
-        onSignupSuccess(data.user);
+        Alert.alert('Success', isLoginMode ? 'Logged in successfully!' : 'Account created successfully!');
+
+        // Pass full AuthState (user, token, mqtt credentials) to parent
+        onAuthSuccess({
+          user: data.user,
+          token: data.token,
+          mqtt: data.mqtt,
+        });
       } else {
-        Alert.alert('Signup Failed', data.error || 'Something went wrong');
+        Alert.alert('Authentication Failed', data.error || 'Something went wrong');
       }
     } catch (error) {
       Alert.alert('Network Error', 'Could not connect to backend service.');
@@ -126,10 +168,10 @@ function SignupScreen({ onSignupSuccess }: SignupScreenProps): React.ReactElemen
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>IoT Registration</Text>
+      <Text style={styles.title}>{isLoginMode ? 'IoT User Login' : 'IoT User Registration'}</Text>
 
       <View style={styles.form}>
-        <TextInput
+        {!isLoginMode && (<TextInput
           style={styles.input}
           placeholder="Username"
           placeholderTextColor="#888"
@@ -138,6 +180,7 @@ function SignupScreen({ onSignupSuccess }: SignupScreenProps): React.ReactElemen
           autoCapitalize="none"
           editable={!loading}
         />
+        )}
         <TextInput
           style={styles.input}
           placeholder="Email Address"
@@ -158,8 +201,20 @@ function SignupScreen({ onSignupSuccess }: SignupScreenProps): React.ReactElemen
           editable={!loading}
         />
 
-        <TouchableOpacity style={styles.button} onPress={handleSignup} disabled={loading}>
-          {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Sign Up</Text>}
+        <TouchableOpacity style={styles.button} onPress={handleAuthSubmit} disabled={loading}>
+          {loading ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.buttonText}>{isLoginMode ? 'Log In' : 'Sign Up'}</Text>
+          )}
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.toggleButton} onPress={toggleAuthMode} disabled={loading}>
+          <Text style={styles.toggleButtonText}>
+            {isLoginMode
+              ? "Don't have an account? Sign Up"
+              : 'Already have an account? Log In'}
+          </Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -169,13 +224,19 @@ function SignupScreen({ onSignupSuccess }: SignupScreenProps): React.ReactElemen
 // ----------------------------------------------------------------------------
 // DASHBOARD SCREEN
 // ----------------------------------------------------------------------------
-function DeviceDashboard({ user, onLogout }: DeviceDashboardProps) {
+function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
+  const { user, mqtt } = authState;
   const [devices, setDevices] = useState<DeviceItem[]>([]);
   const [fetching, setFetching] = useState<boolean>(true);
   const [modalVisible, setModalVisible] = useState<boolean>(false);
 
   useEffect(() => {
     fetchDevices();
+
+    // ------------------------------------------------------------------------
+    // TODO: Connect React Native MQTT client using `mqtt` credentials here
+    // e.g., const client = initMqttClient(mqtt);
+    // ------------------------------------------------------------------------
   }, []);
 
   const fetchDevices = async (): Promise<void> => {
@@ -344,9 +405,7 @@ function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDeviceBLEModalProps)
                 (charError: BleError | null, characteristic) => {
                   if (charError) {
 
-                    if (sessionState.isFinished) {
-                      return;
-                    }
+                    if (sessionState.isFinished) return;
 
                     const errorMsg = charError.message || '';
                     const errorCode = charError.errorCode;
@@ -532,10 +591,22 @@ const styles = StyleSheet.create({
   modalContainer: { flex: 1, justifyContent: 'center', padding: 20, backgroundColor: '#fff' },
   title: { fontSize: 22, fontWeight: 'bold', textAlign: 'center', marginBottom: 20 },
   form: { backgroundColor: '#fff', padding: 20, borderRadius: 10, elevation: 2 },
-  input: { borderWidth: 1, borderColor: '#ccc', borderRadius: 6, padding: 12, marginBottom: 15, fontSize: 16, backgroundColor: '#fff' },
+  input: { 
+    color: '#000000', 
+    borderWidth: 1, 
+    borderColor: '#ccc', 
+    borderRadius: 6, 
+    padding: 12, 
+    marginBottom: 15, 
+    fontSize: 16, 
+    backgroundColor: '#fff',
+    fontFamily: Platform.OS === 'android' ? 'normal': undefined
+  },
   button: { backgroundColor: '#007AFF', padding: 15, borderRadius: 6, alignItems: 'center' },
   disabledButton: { backgroundColor: '#a0c4ff' },
   buttonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  toggleButton: { marginTop: 15, alignItems: 'center' },
+  toggleButtonText: { color: '#007AFF', fontSize: 14, fontWeight: '600' },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
   welcomeText: { fontSize: 20, fontWeight: 'bold' },
   logoutText: { color: '#d9534f', fontWeight: 'bold' },

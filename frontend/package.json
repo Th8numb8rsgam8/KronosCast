@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@babel/core": "^7.24.0",
+    "@types/node": "^26.6.4",
     "typescript": "~6.0.3"
   },
   "private": true
