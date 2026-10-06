@@ -1,0 +1,87 @@
+services:
+  init-dynsec:
+    image: eclipse-mosquitto:2
+    container_name: init_dynsec
+    environment:
+      - MQTT_ADMIN_USER=${MQTT_ADMIN_USER:-admin}
+      - MQTT_ADMIN_PASS=${MQTT_ADMIN_PASS}
+    volumes:
+      # Bind mount directly to local ./config folder on host
+      - ./eclipse-mosquitto/config:/mosquitto/config
+    entrypoint: >
+      /bin/sh -c "
+      if [ ! -f /mosquitto/config/dynamic-security.json ]; then
+        echo 'Generating dynamic-security.json...';
+        mosquitto_ctrl dynsec init /mosquitto/config/dynamic-security.json \$MQTT_ADMIN_USER \$MQTT_ADMIN_PASS;
+        chmod 644 /mosquitto/config/dynamic-security.json;
+      else
+        echo 'dynamic-security.json already exists. Skipping.';
+      fi
+      "
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto_broker
+    restart: unless-stopped
+    depends_on:
+      init-dynsec:
+        condition: service_completed_successfully
+    ports:
+      - "1883:1883"   # Standard MQTT Port
+      - "8883:8883"   # MQTT over TLS/SSL (For production deployment)
+    volumes:
+      # Bind mounts to host directories
+      - ./eclipse-mosquitto/config:/mosquitto/config
+      - ./eclipse-mosquitto/data:/mosquitto/data
+      - ./eclipse-mosquitto/log:/mosquitto/log
+
+# volumes:
+#   mosquitto_config:
+#   mosquitto_data:
+# 
+# services:
+#   # STEP 1: Runs once to seed dynamic-security.json into the shared volume
+#   init-dynsec:
+#     build:
+#       context: .
+#       dockerfile: Dockerfile
+#     container_name: init_dynsec
+#     environment:
+#       - MQTT_ADMIN_USER=${MQTT_ADMIN_USER:-admin}
+#       - MQTT_ADMIN_PASS=${MQTT_ADMIN_PASS}
+#     # Mount the config volume to the location expected by your generation script
+#     volumes:
+#       - mosquitto_config:/app/config
+#     # Executes ONLY the generator script, then shuts down cleanly
+#     command: npm run generate:dynsec
+# 
+#   # STEP 2: Boots ONLY after init-dynsec completes successfully
+#   mosquitto:
+#     image: eclipse-mosquitto:2
+#     container_name: mosquitto_broker
+#     restart: unless-stopped
+#     depends_on:
+#       init-dynsec:
+#         condition: service_completed_successfully
+#     ports:
+#       - "1883:1883"
+#     volumes:
+#       - mosquitto_config:/mosquitto/config
+#       - mosquitto_data:/mosquitto/data
+# 
+#   # STEP 3: Express Backend (Production)
+#   express_backend:
+#     build:
+#       context: .
+#       dockerfile: Dockerfile
+#     container_name: express_backend
+#     restart: unless-stopped
+#     depends_on:
+#       - mosquitto
+#     ports:
+#       - "3000:3000"
+#     environment:
+#       - MQTT_BROKER_URL=mqtt://mosquitto:1883
+#       - MQTT_ADMIN_USER=${MQTT_ADMIN_USER:-admin}
+#       - MQTT_ADMIN_PASS=${MQTT_ADMIN_PASS}
+#     command: npm start

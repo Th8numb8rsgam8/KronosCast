@@ -4,7 +4,14 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "generate:dynsec": "node scripts/generate-dynsec.js",
+    "predev": "npm run generate:dynsec",
+    "dev": "npx tsx server.ts",
+    "prebuild": "npm run generate:dynsec",
+    "build": "tsc",
+    "prestart": "npm run generate:dynsec",
+    "start": "node dist/server.js"
   },
   "keywords": [],
   "author": "",

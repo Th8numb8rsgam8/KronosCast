@@ -1,3 +1,6 @@
 .env
 .expo/
 node_modules/
+*.log
+*.db
+dynamic-security.json
