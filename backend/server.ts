@@ -66,8 +66,8 @@ const MQTT_BROKER_URL = process.env.MQTT_BROKER_URL || 'mqtt://localhost:1883';
 const MQTT_ADMIN_USER = process.env.MQTT_ADMIN_USER || 'admin';
 const MQTT_ADMIN_PASS = process.env.MQTT_ADMIN_PASS || 'backend_secret_password';
 
-// Public WebSocket endpoint returned to mobile app
-const MQTT_PUBLIC_WSS_URL = process.env.MQTT_PUBLIC_WSS_URL || 'wss://mqtt.yourdomain.com:8084/mqtt';
+// Public MQTTS endpoint returned to mobile app
+const MQTT_PUBLIC_URL = process.env.MQTT_PUBLIC_URL;
 
 const pool = new Pool({
   user: process.env.DB_USER,
@@ -192,7 +192,7 @@ async function provisionMqttUserInMosquitto(userId: string, rawMqttPassword: str
  */
 function buildMqttResponseObject(userId: string, mqttUsername: string, rawMqttPassword: string) {
   return {
-    brokerUrl: MQTT_PUBLIC_WSS_URL,
+    brokerUrl: MQTT_PUBLIC_URL,
     username: mqttUsername,
     password: rawMqttPassword,
     topics: {

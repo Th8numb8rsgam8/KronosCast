@@ -1,6 +1,7 @@
 .env
 .expo/
 node_modules/
+certs/
 *.log
 *.db
 dynamic-security.json

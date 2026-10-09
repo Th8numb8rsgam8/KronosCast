@@ -29,6 +29,7 @@ services:
     ports:
       - "1883:1883"   # Standard MQTT Port
       - "8883:8883"   # MQTT over TLS/SSL (For production deployment)
+      - "9001:9001"
     volumes:
       # Bind mounts to host directories
       - ./eclipse-mosquitto/config:/mosquitto/config
