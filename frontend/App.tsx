@@ -43,7 +43,6 @@ export interface AuthState {
 export interface DeviceItem {
   id: string;
   device_name: string;
-  mqtt_topic: string;
 }
 
 interface AuthScreenProps {
@@ -418,7 +417,6 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
   const renderDeviceItem: ListRenderItem<DeviceItem> = ({ item }) => (
     <View style={styles.deviceCard}>
       <Text style={styles.deviceName}>{item.device_name}</Text>
-      <Text style={styles.deviceTopic}>Topic: {item.mqtt_topic}</Text>
     </View>
   );
 

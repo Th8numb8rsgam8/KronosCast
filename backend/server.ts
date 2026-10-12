@@ -26,7 +26,9 @@ export interface DeviceRow {
   id: string;
   user_id: string;
   device_name: string;
-  mqtt_topic: string;
+  hardware_id: string | null;
+  mqtt_username: string | null;
+  mqtt_password_hash: string | null;
   created_at: Date;
 }
 
@@ -34,7 +36,6 @@ export interface SetupJwtPayload extends JwtPayload {
   userId: string;
   backendUrl: string;
   deviceId: string;
-  mqttTopic: string;
 }
 
 interface SignupRequestBody {
@@ -97,8 +98,12 @@ async function initDb(): Promise<void> {
           id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
           user_id UUID REFERENCES users(id) ON DELETE CASCADE,
           device_name VARCHAR(100) NOT NULL,
-          mqtt_topic VARCHAR(255) NOT NULL,
-          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+          hardware_id VARCHAR(255) UNIQUE NOT NULL,
+          mqtt_username VARCHAR(100) UNIQUE,
+          mqtt_password_hash VARCHAR(255),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          CONSTRAINT unique_device_name_per_user UNIQUE (user_id, device_name)
+
       );
     `);
     console.log('Database tables verified / created successfully.');
@@ -108,6 +113,7 @@ async function initDb(): Promise<void> {
 }
 
 initDb();
+
 
 // ----------------------------------------------------------------------------
 // MQTT ADMIN CLIENT & PROVISIONING SERVICE (DynSec Plugin)
@@ -125,6 +131,14 @@ mqttAdminClient.on('connect', () => {
 mqttAdminClient.on('error', (err: Error) => {
   console.error('Mosquitto Admin Connection Error:', err.message);
 });
+
+function getDeviceMqttTopics(userId: string, deviceId: string) {
+  return {
+    telemetry: `users/${userId}/devices/${deviceId}/telemetry`,
+    status: `users/${userId}/devices/${deviceId}/status`,
+    commands: `users/${userId}/devices/${deviceId}/commands`,
+  };
+}
 
 /**
  * Provisions dynamic RBAC role and client credentials inside Mosquitto via $CONTROL/dynamic-security/v1
@@ -181,6 +195,64 @@ async function provisionMqttUserInMosquitto(userId: string, rawMqttPassword: str
   };
 
   // Publish configuration commands to Mosquitto's dynamic security control topic
+  mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(createRoleCmd));
+  mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(createClientCmd));
+
+  return mqttUsername;
+}
+
+/**
+ * Provisions a dedicated MQTT user and ACL permissions for an individual edge device
+ */
+async function provisionEdgeDeviceInMosquitto(deviceId: string, userId: string, rawMqttPassword: string): Promise<string> {
+  const mqttUsername = `device_${deviceId}`;
+  const roleName = `role_device_${deviceId}`;
+
+  const createRoleCmd = {
+    commands: [
+      {
+        command: 'createRole',
+        rolename: roleName,
+        acls: [
+          {
+            acltype: 'publishClientSend',
+            topic: `users/${userId}/devices/${deviceId}/telemetry`,
+            priority: 1,
+            allow: true
+          },
+          {
+            acltype: 'publishClientSend',
+            topic: `users/${userId}/devices/${deviceId}/status`,
+            priority: 1,
+            allow: true
+          },
+          {
+            acltype: 'subscribePattern',
+            topic: `users/${userId}/devices/${deviceId}/commands`,
+            priority: 1,
+            allow: true
+          }
+        ]
+      }
+    ]
+  };
+
+  const createClientCmd = {
+    commands: [
+      {
+        command: 'createClient',
+        username: mqttUsername,
+        password: rawMqttPassword,
+        roles: [
+          {
+            rolename: roleName,
+            priority: 1
+          }
+        ]
+      }
+    ]
+  };
+
   mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(createRoleCmd));
   mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(createClientCmd));
 
@@ -400,38 +472,20 @@ app.post(
     const backendUrl = `${protocol}://${host}/api/devices/verify-setup`;
 
     try {
-      // 1. Create temporary device entry to obtain UUID
-      const uuidResult = await pool.query<{ id: string }>('SELECT uuid_generate_v4() AS id');
-      const tempDeviceId = uuidResult.rows[0].id;
-      const autoMqttTopic = `users/${userId}/devices/${tempDeviceId}`;
-
-      // 2. Insert device into database
-      const newDevice = await pool.query<Pick<DeviceRow, 'id' | 'device_name' | 'mqtt_topic'>>(
-        `INSERT INTO devices (id, user_id, device_name, mqtt_topic) 
-         VALUES ($1, $2, $3, $4) 
-         RETURNING id, device_name, mqtt_topic`,
-        [tempDeviceId, userId, deviceName.trim(), autoMqttTopic]
-      );
-
-      const device = newDevice.rows[0];
 
       // 3. Create a stateless signed JWT token expiring in 15 minutes
       const signOptions: SignOptions = { expiresIn: '15m' };
       const setupToken = jwt.sign(
         { 
-          // userId: userId, 
-          // backendUrl: backendUrl,
           userId,
+          deviceName: deviceName.trim(),
           backendUrl,
-          deviceId: device.id, 
-          mqttTopic: device.mqtt_topic 
         },
         JWT_SECRET,
         signOptions
       );
 
       return res.status(201).json({ 
-        device,
         setupToken // Returned to mobile app to transmit over BLE
       });
     } catch (err) {
@@ -467,27 +521,86 @@ app.post(
     });
   }
 
+  const client: PoolClient = await pool.connect();
+
   try {
+
+    await client.query('BEGIN');
+
     // Statelessly verify signature & expiration
     const decoded = jwt.verify(token, JWT_SECRET) as SetupJwtPayload;
 
-    // Fetch device record using decoded payload ID
-    const result = await pool.query(
-      `SELECT id, device_name, mqtt_topic FROM devices WHERE id = $1 AND user_id = $2`,
-      [decoded.deviceId, decoded.userId]
+    // 1. Create temporary device entry to obtain UUID
+    const uuidResult = await pool.query<{ id: string }>('SELECT uuid_generate_v4() AS id');
+    const deviceId = uuidResult.rows[0].id;
+
+    // 2. Insert device into database
+    const newDevice = await pool.query<Pick<DeviceRow, 'id' | 'user_id' | 'device_name'>>(
+      `INSERT INTO devices (id, user_id, device_name, hardware_id) 
+       VALUES ($1, $2, $3, $4) 
+       RETURNING id, user_id, device_name`,
+      [deviceId, decoded.userId, decoded.deviceName, hardware_id.trim()]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Device record not found.' });
-    }
+    const device = newDevice.rows[0];
 
-    return res.json({ message: 'Device successfully verified!', device: result.rows[0] });
+    const rawMqttPassword: string = crypto.randomBytes(18).toString('hex');
+    const mqttPasswordHash: string = await bcrypt.hash(rawMqttPassword, 10);
+    const mqttUsername = await provisionEdgeDeviceInMosquitto(device.id, device.user_id, rawMqttPassword);
+
+    // 5. Save the hardware_id and update MQTT credentials in PostgreSQL
+    await client.query(
+      `UPDATE devices 
+       SET mqtt_username = $1, mqtt_password_hash = $2 
+       WHERE id = $3`,
+      [mqttUsername, mqttPasswordHash || null, device.id]
+    );
+
+    await client.query('COMMIT');
+
+    // 6. Dynamically generate the topic structures
+    const topics = getDeviceMqttTopics(device.user_id, device.id);
+
+    // 7. Return configuration packet to the edge device
+    return res.json({
+      message: 'Device successfully verified and provisioned!',
+      device: {
+        id: device.id,
+        deviceName: device.device_name,
+      },
+      mqtt: {
+        brokerUrl: MQTT_PUBLIC_URL,
+        username: mqttUsername,
+        password: rawMqttPassword || undefined, // Only returned on initial provisioning
+        topics: {
+          telemetry: topics.telemetry,
+          status: topics.status,
+          commands: topics.commands,
+        }
+      }
+    });
+
   } catch (err: unknown) {
+    await client.query('ROLLBACK');
+
     if (err instanceof jwt.TokenExpiredError) {
       return res.status(401).json({ error: 'Setup token has expired. Please restart pairing.' });
     }
+
+    if (err instanceof DatabaseError && err.code === '23505') {
+
+      const constraint = err.constraint;
+      if (constraint === 'unique_device_name_per_user') {
+        return res.status(400).json({ error: 'You already have a device with this name. Please choose a unique name.' });
+      }
+
+      return res.status(400).json({ error: 'This hardware ID is already registered to another device.' });
+    }
+
     console.error('Error verifying setup token:', err);
-    return res.status(400).json({ error: 'Invalid setup token.' });
+    return res.status(400).json({ error: 'Invalid setup token or verification failed.' });
+  } finally {
+    client.release();
   }
 });
 
@@ -499,7 +612,7 @@ app.get(
 
     try {
       const result = await pool.query<DeviceRow>(
-        `SELECT id, device_name, mqtt_topic, created_at 
+        `SELECT id, device_name, created_at 
          FROM devices 
          WHERE user_id = $1 
          ORDER BY created_at DESC`,
