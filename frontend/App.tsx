@@ -80,32 +80,6 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!\%*?&]{8,}$/;
 
 // ----------------------------------------------------------------------------
-// HELPER: LOAD CA CERTIFICATE
-// ----------------------------------------------------------------------------
-// async function loadCACertificate(): Promise<string> {
-//   const asset = Asset.fromModule(require('./assets/certs/ca.crt'));
-//   await asset.downloadAsync();
-// 
-//   if (!asset.localUri) {
-//     throw new Error('Failed to load CA certificate asset.');
-//   }
-// 
-//   // Modern fetching strategy to avoid Expo FileSystem deprecation warnings
-//   const response = await fetch(asset.localUri);
-//   let certText = await response.text();
-// 
-//   // Normalize newlines to standard LF format
-//   certText = certText.replace(/\r\n/g, '\n').trim();
-// 
-//   // Verify the certificate wasn't flattened
-//   if (!certText.includes('\n')) {
-//     console.warn('[TLS] Certificate appears flattened without newlines!');
-//   }
-// 
-//   return certText;
-// }
-
-// ----------------------------------------------------------------------------
 // CUSTOM HOOK: MQTT MANAGEMENT
 // ----------------------------------------------------------------------------
 function useMQTT(mqttInfo?: MqttCredentials) {
@@ -353,16 +327,18 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
   const [fetching, setFetching] = useState<boolean>(true);
   const [modalVisible, setModalVisible] = useState<boolean>(false);
 
+  const [selectedDevice, setSelectedDevice] = useState<DeviceItem | null>(null);
+
+  // Store telemetry for ALL devices mapped by deviceId: { [deviceId]: payload }
+  const [deviceTelemetryMap, setDeviceTelemetryMap] = useState<Record<string, any>>({});
+  // Store status for ALL devices mapped by deviceId: { [deviceId]: status }
+  const [deviceStatusMap, setDeviceStatusMap] = useState<Record<string, string>>({});
+
   // Initialize MQTT over TLS automatically using auth credentials
   const { client, isConnected, error: mqttError } = useMQTT(mqttInfo);
 
   useEffect(() => {
     fetchDevices();
-
-    // ------------------------------------------------------------------------
-    // TODO: Connect React Native MQTT client using `mqtt` credentials here
-    // e.g., const client = initMqttClient(mqtt);
-    // ------------------------------------------------------------------------
   }, []);
 
   // Handle MQTT subscriptions and incoming messages
@@ -384,9 +360,23 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
     const handleMessage = (topic: string, payload: Buffer) => {
       try {
         const messageStr = payload.toString('utf-8');
-        console.log(`[MQTT Message] ${topic}:`, messageStr);
+        const data = JSON.parse(messageStr);
+
+        const segments= topic.split('/');
+        const deviceIdIndex = segments.indexOf('devices') + 1;
+
+        if (deviceIdIndex > 0 && segments[deviceIdIndex]) {
+          const deviceId = segments[deviceIdIndex];
+          const subType = segments[segments.length - 1];
+
+          if (subType === 'telemetry') {
+            setDeviceTelemetryMap((prev) => ({ ...prev, [deviceId]: data }));
+          } else if (subType === 'status') {
+            setDeviceStatusMap((prev) => ({ ...prev, [deviceId]: data.status || data }));
+          }
+        }
       } catch (e) {
-        console.warn(`[MQTT Raw] ${topic}:`, payload.toString());
+        console.warn(`[MQTT Parse Error] Topic ${topic}:`, e);
       }
     };
 
@@ -414,11 +404,39 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
     }
   };
 
-  const renderDeviceItem: ListRenderItem<DeviceItem> = ({ item }) => (
-    <View style={styles.deviceCard}>
-      <Text style={styles.deviceName}>{item.device_name}</Text>
-    </View>
-  );
+  // Construct dynamic command topic using your template format:
+  // commandPublish: "users/{userId}/devices/{deviceId}/commands"
+  const handleSendCommand = (command: string) => {
+    if (!client || !isConnected || !selectedDevice || !mqttInfo) return;
+    
+    const commandTopic = mqttInfo.topics.commandPublish.replace('{deviceId}', selectedDevice.id);
+    const payload = JSON.stringify({ command, timestamp: Date.now() });
+  
+    // Call publish directly on the mqtt client instance
+    client.publish(commandTopic, payload, { qos: 1 }, (err) => {
+      if (err) {
+        console .error('[MQTT] Failed to publish command:', err);
+        Alert.alert('Error', 'Failed to send command.');
+      } else {
+        Alert.alert('Command Sent', `Sent '${command}' to ${selectedDevice.device_name}`);
+      }
+    });
+  };
+
+  const renderDeviceItem: ListRenderItem<DeviceItem> = ({ item }) => {
+    const isSelected = selectedDevice?.id === item.id;
+    const liveStatus = deviceStatusMap[item.id] || 'Unknown';
+    
+    return (
+      <TouchableOpacity 
+        style={[styles.deviceCard, isSelected && styles.selectedDeviceCard]}
+        onPress={() => setSelectedDevice(item)}
+      >
+        <Text style={styles.deviceName}>{item.device_name}</Text>
+        <Text style={styles.deviceSubText}>Status: <Text style={{fontWeight: 'bold'}}>{liveStatus}</Text></Text>
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <View style={styles.dashboardContainer}>
@@ -429,19 +447,14 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
         </TouchableOpacity>
       </View>
 
-      {/* Real-time MQTT Connection Status Bar */}
       <View style={styles.statusBadge}>
         <Text style={styles.statusLabel}>MQTT Status: </Text>
         {isConnected ? (
-          <Text style={styles.statusConnected}>Connected (TLS)</Text>
+          <Text style={styles.statusConnected}>Connected</Text>
         ) : (
-          <View style={styles.statusRow}>
             <ActivityIndicator size="small" color="#007AFF" />
-            <Text style={styles.statusConnecting}> Connecting...</Text>
-          </View>
         )}
       </View>
-      {mqttError && <Text style={styles.mqttErrorText}>{mqttError}</Text>}
 
       <TouchableOpacity style={styles.addButton} onPress={() => setModalVisible(true)}>
         <Text style={styles.addButtonText}>+ Add Edge Device (BLE)</Text>
@@ -458,6 +471,34 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
           renderItem={renderDeviceItem}
           ListEmptyComponent={<Text style={styles.emptyText}>No devices added yet.</Text>}
         />
+      )}
+
+      {/* Selected Device Panel displaying real-time state from the map */}
+      {selectedDevice && (
+        <View style={styles.selectedPanel}>
+          <View style={styles.panelHeader}>
+            <Text style={styles.panelTitle}>Control: {selectedDevice.device_name}</Text>
+            <TouchableOpacity onPress={() => setSelectedDevice(null)}>
+              <Text style={styles.closePanelText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+          
+          <Text style={styles.panelSubHeader}>Live Telemetry Data:</Text>
+          <View style={styles.telemetryBox}>
+            <Text style={styles.telemetryText}>
+              {deviceTelemetryMap[selectedDevice.id] 
+                ? JSON.stringify(deviceTelemetryMap[selectedDevice.id], null, 2) 
+                : 'Listening for telemetry payload...'}
+            </Text>
+          </View>
+
+          <TouchableOpacity 
+            style={styles.commandButton} 
+            onPress={() => handleSendCommand('TOGGLE_STATE')}
+          >
+            <Text style={styles.buttonText}>Publish Command</Text>
+          </TouchableOpacity>
+        </View>
       )}
 
       <Modal visible={modalVisible} animationType="slide">
@@ -807,4 +848,60 @@ const styles = StyleSheet.create({
   statusText: { color: '#007AFF', textAlign: 'center', marginVertical: 10, fontStyle: 'italic' },
   cancelButton: { marginTop: 15, alignItems: 'center' },
   cancelButtonText: { color: '#888', fontSize: 16 },
+  selectedDeviceCard: {
+    borderColor: '#007AFF',
+    backgroundColor: '#f0f7ff',
+    borderWidth: 2,
+  },
+  deviceSubText: {
+    fontSize: 12,
+    color: '#666',
+    marginTop: 4,
+  },
+  selectedPanel: {
+    marginTop: 15,
+    padding: 15,
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ccc',
+  },
+  panelHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  panelTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  closePanelText: {
+    color: '#007AFF',
+    fontWeight: 'bold',
+  },
+  panelSubHeader: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#444',
+    marginBottom: 5,
+  },
+  telemetryBox: {
+    backgroundColor: '#1e1e1e',
+    padding: 10,
+    borderRadius: 6,
+    marginBottom: 10,
+  },
+  telemetryText: {
+    color: '#00ff00',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    fontSize: 12,
+  },
+  commandButton: {
+    backgroundColor: '#007AFF',
+    padding: 12,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
 });
