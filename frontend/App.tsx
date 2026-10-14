@@ -16,6 +16,7 @@ import {
 import { BleManager, Device, Subscription, BleError } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 import mqtt, { MqttClient, IClientOptions } from 'mqtt';
+import { join } from 'path';
 
 export interface MqttCredentials {
   brokerUrl: string;
@@ -63,6 +64,19 @@ interface AddDeviceBLEModalProps {
 interface SessionState {
   isFinished: boolean;
 }
+
+interface DeviceCommand {
+  label: string;
+  actionValue: string;
+  buttonColor?: string;
+}
+
+const AVAILABLE_COMMANDS: DeviceCommand[] = [
+  { label: 'StreamSwitch On', actionValue: 'STREAMSWITCH_ON', buttonColor: '#007AFF' },
+  { label: 'StreamSwitch Off', actionValue: 'STREAMSWITCH_OFF', buttonColor: '#d9534f' },
+  { label: 'Reboot Device', actionValue: 'REBOOT', buttonColor: '#f0ad4e' },
+  // { label: 'Calibrate Sensor', actionValue: 'CALIBRATE', buttonColor: '#5cb85c' },
+];
 
 const bleManager = new BleManager();
 
@@ -334,11 +348,40 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
   // Store status for ALL devices mapped by deviceId: { [deviceId]: status }
   const [deviceStatusMap, setDeviceStatusMap] = useState<Record<string, string>>({});
 
+  // Track timestamp of the last received packet per device to calculate timeouts
+  // const [deviceLastSeenMap, setDeviceLastSeenMap] = useState<Record<string, number>>({});
+  const deviceLastSeenRef = useRef<Record<string, number>>({});
+
   // Initialize MQTT over TLS automatically using auth credentials
   const { client, isConnected, error: mqttError } = useMQTT(mqttInfo);
 
   useEffect(() => {
     fetchDevices();
+  }, []);
+
+  // Watchdog timer to flag devices as offline if no message received for 15 seconds
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setDeviceStatusMap((prevStatus) => {
+        let updated = false;
+        const nextStatus = { ...prevStatus };
+
+        Object.keys(nextStatus).forEach((deviceId) => {
+          const lastSeen = deviceLastSeenRef.current[deviceId] || 0;
+          //const lastSeen = deviceLastSeenMap[deviceId] || 0;
+          // If active for more than 15 seconds without communication, set offline
+          if (nextStatus[deviceId] === 'online' && now - lastSeen > 15000) {
+            nextStatus[deviceId] = 'offline';
+            updated = true;
+          }
+        });
+
+        return updated ? nextStatus : prevStatus;
+      });
+    }, 5000); // Check every 5 seconds
+
+    return () => clearInterval(interval);
   }, []);
 
   // Handle MQTT subscriptions and incoming messages
@@ -368,11 +411,17 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
         if (deviceIdIndex > 0 && segments[deviceIdIndex]) {
           const deviceId = segments[deviceIdIndex];
           const subType = segments[segments.length - 1];
+          // const now = Date.now();
+
+          // Update last seen timestamp
+          // setDeviceLastSeenMap((prev) => ({ ...prev, [deviceId]: now }));
+          deviceLastSeenRef.current[deviceId] = Date.now();
 
           if (subType === 'telemetry') {
             setDeviceTelemetryMap((prev) => ({ ...prev, [deviceId]: data }));
           } else if (subType === 'status') {
-            setDeviceStatusMap((prev) => ({ ...prev, [deviceId]: data.status || data }));
+            const statusValue = typeof data === 'object' ? (data.status || 'online') : data;
+            setDeviceStatusMap((prev) => ({ ...prev, [deviceId]: statusValue }));
           }
         }
       } catch (e) {
@@ -406,11 +455,14 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
 
   // Construct dynamic command topic using your template format:
   // commandPublish: "users/{userId}/devices/{deviceId}/commands"
-  const handleSendCommand = (command: string) => {
-    if (!client || !isConnected || !selectedDevice || !mqttInfo) return;
+  const handleSendCommand = (actionValue: string) => {
+    if (!selectedDevice || !mqttInfo || !client) return;
     
     const commandTopic = mqttInfo.topics.commandPublish.replace('{deviceId}', selectedDevice.id);
-    const payload = JSON.stringify({ command, timestamp: Date.now() });
+    const payload = JSON.stringify({ 
+      command: actionValue, 
+      timestamp: Date.now() 
+    });
   
     // Call publish directly on the mqtt client instance
     client.publish(commandTopic, payload, { qos: 1 }, (err) => {
@@ -418,23 +470,49 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
         console .error('[MQTT] Failed to publish command:', err);
         Alert.alert('Error', 'Failed to send command.');
       } else {
-        Alert.alert('Command Sent', `Sent '${command}' to ${selectedDevice.device_name}`);
+        Alert.alert('Command Sent', `Sent '${actionValue}' to ${selectedDevice.device_name}`);
       }
     });
   };
 
   const renderDeviceItem: ListRenderItem<DeviceItem> = ({ item }) => {
     const isSelected = selectedDevice?.id === item.id;
-    const liveStatus = deviceStatusMap[item.id] || 'Unknown';
+    const liveStatus = deviceStatusMap[item.id] || 'offline';
+    const isOnline = liveStatus.toLowerCase() === 'online';
     
     return (
       <TouchableOpacity 
         style={[styles.deviceCard, isSelected && styles.selectedDeviceCard]}
         onPress={() => setSelectedDevice(item)}
       >
-        <Text style={styles.deviceName}>{item.device_name}</Text>
-        <Text style={styles.deviceSubText}>Status: <Text style={{fontWeight: 'bold'}}>{liveStatus}</Text></Text>
+        <View style={styles.cardHeaderRow}>
+          <Text style={styles.deviceName}>{item.device_name}</Text>
+          {/* Status Indicator Dot */}
+          <View style={styles.statusIndicatorContainer}>
+            <View style={[styles.dot, { backgroundColor: isOnline ? '#4CD964' : '#FF3B30' }]} />
+            <Text style={[styles.onlineStatusText, { color: isOnline ? '#2e7d32' : '#c62828' }]}>
+              {isOnline ? 'Online' : 'Offline'}
+            </Text>
+          </View>
+        </View>
       </TouchableOpacity>
+    );
+  };
+
+  const renderTelemetryData = (telemetryObj: any) => {
+    if (!telemetryObj || typeof telemetryObj !== 'object') {
+      return <Text style={styles.telemetryPlaceholder}>Waiting for telemetry data...</Text>;
+    }
+
+    return (
+      <View style={styles.telemetryGrid}>
+        {Object.entries(telemetryObj).map(([key, value]) => (
+          <View key={key} style={styles.telemetryCard}>
+            <Text style={styles.telemetryKey}>{key.replace(/_/g, ' ').toUpperCase()}</Text>
+            <Text style={styles.telemetryValue}>{String(value)}</Text>
+          </View>
+        ))}
+      </View>
     );
   };
 
@@ -448,7 +526,7 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
       </View>
 
       <View style={styles.statusBadge}>
-        <Text style={styles.statusLabel}>MQTT Status: </Text>
+        <Text style={styles.statusLabel}>MQTT Broker: </Text>
         {isConnected ? (
           <Text style={styles.statusConnected}>Connected</Text>
         ) : (
@@ -473,7 +551,6 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
         />
       )}
 
-      {/* Selected Device Panel displaying real-time state from the map */}
       {selectedDevice && (
         <View style={styles.selectedPanel}>
           <View style={styles.panelHeader}>
@@ -483,21 +560,23 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
             </TouchableOpacity>
           </View>
           
-          <Text style={styles.panelSubHeader}>Live Telemetry Data:</Text>
-          <View style={styles.telemetryBox}>
-            <Text style={styles.telemetryText}>
-              {deviceTelemetryMap[selectedDevice.id] 
-                ? JSON.stringify(deviceTelemetryMap[selectedDevice.id], null, 2) 
-                : 'Listening for telemetry payload...'}
-            </Text>
+          <Text style={styles.panelSubHeader}>Live Telemetry Metrics:</Text>
+          <View style={styles.telemetryContainer}>
+            {renderTelemetryData(deviceTelemetryMap[selectedDevice.id])}
           </View>
 
-          <TouchableOpacity 
-            style={styles.commandButton} 
-            onPress={() => handleSendCommand('TOGGLE_STATE')}
-          >
-            <Text style={styles.buttonText}>Publish Command</Text>
-          </TouchableOpacity>
+          <Text style={styles.panelSubHeader}>Available Actions:</Text>
+          <View style={styles.commandGrid}>
+            {AVAILABLE_COMMANDS.map((cmd) => (
+              <TouchableOpacity 
+                key={cmd.actionValue}
+                style={[styles.gridButton, { backgroundColor: cmd.buttonColor || '#007AFF' }]} 
+                onPress={() => handleSendCommand(cmd.actionValue)}
+              >
+                <Text style={styles.buttonText}>{cmd.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
       )}
 
@@ -904,4 +983,70 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     alignItems: 'center',
   },
+  commandGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  gridButton: {
+    width: '48%',
+    padding: 12,
+    borderRadius: 6,
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  statusIndicatorContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  dot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  onlineStatusText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  telemetryContainer: {
+    marginBottom: 15,
+  },
+  telemetryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  telemetryCard: {
+    backgroundColor: '#f8f9fa',
+    borderWidth: 1,
+    borderColor: '#e9ecef',
+    borderRadius: 6,
+    padding: 10,
+    width: '48%',
+    alignItems: 'center',
+  },
+  telemetryKey: {
+    fontSize: 10,
+    color: '#6c757d',
+    marginBottom: 4,
+    fontWeight: '600',
+  },
+  telemetryValue: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#343a40',
+  },
+  telemetryPlaceholder: {
+    color: '#6c757d',
+    fontStyle: 'italic',
+    textAlign: 'center',
+    padding: 10,
+  }
 });

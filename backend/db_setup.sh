@@ -31,3 +31,7 @@ npm install express pg dotenv
 
 npx ngrok config add-authtoken YOUR_COPIED_AUTHTOKEN
 npx ngrok http 3000
+
+# Setup for WSL
+# sudo vim /etc/postgresql/17/main/pg_hba.conf
+# sudo vim /etc/postgresql/17/main/postgresql.conf
