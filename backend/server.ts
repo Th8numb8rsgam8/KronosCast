@@ -8,9 +8,35 @@ import { Pool, PoolClient, DatabaseError } from 'pg';
 import mqtt from 'mqtt';
 import crypto from 'crypto';
 
-const app: Application = express();
-app.set('trust proxy', 'loopback'); // Trust the loopback interface for proxy headers
-app.use(express.json());
+import axios from 'axios';
+import https from 'https';
+import http from 'http';
+import fs from 'fs';
+import * as jsrsasign from 'jsrsasign';
+
+const publicApp: Application = express();
+publicApp.set('trust proxy', 'loopback'); // Trust the loopback interface for proxy headers
+publicApp.use(express.json());
+
+const mtlsApp: Application = express();
+mtlsApp.use(express.json());
+
+interface FactoryPayload {
+  hardwareId: string;
+  timestamp: string;
+  signature: string;
+}
+
+interface RegistrationBody {
+  csr: string;
+  // onboarding_token: string;
+}
+
+interface CFSSLSignedResponse {
+  result: {
+    certificate: string;
+  };
+}
 
 export interface UserRow {
   id: string;
@@ -70,6 +96,9 @@ const MQTT_ADMIN_PASS = process.env.MQTT_ADMIN_PASS || 'backend_secret_password'
 // Public MQTTS endpoint returned to mobile app
 const MQTT_PUBLIC_URL = process.env.MQTT_PUBLIC_URL;
 
+// Load the public key safely on server startup
+const PUBLIC_KEY_PEM = fs.readFileSync('./public_key.pem', 'utf8');
+
 const pool = new Pool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD, // Handles '@' automatically without encoding
@@ -104,6 +133,22 @@ async function initDb(): Promise<void> {
           created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
           CONSTRAINT unique_device_name_per_user UNIQUE (user_id, device_name)
 
+      );
+
+      DO $$ 
+      BEGIN
+          IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'device_status') THEN
+              CREATE TYPE device_status AS ENUM ('pre_authorized', 'active', 'revoked');
+          END IF;
+      END $$;
+
+      CREATE TABLE IF NOT EXISTS device_whitelist (
+          id SERIAL PRIMARY KEY,
+          hardware_id VARCHAR(255) UNIQUE NOT NULL,
+          status device_status DEFAULT 'pre_authorized',
+          user_id UUID REFERENCES users(id) ON DELETE SET NULL, -- Linked when user registers it
+          registered_at TIMESTAMP WITH TIME ZONE,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
     console.log('Database tables verified / created successfully.');
@@ -275,7 +320,7 @@ function buildMqttResponseObject(userId: string, mqttUsername: string, rawMqttPa
   };
 }
 
-app.get(
+publicApp.get(
   '/health', 
   async (_req: Request, res: Response): Promise<Response> => {
   try {
@@ -293,7 +338,7 @@ app.get(
 
 
 // User Signup Endpoint
-app.post(
+publicApp.post(
   '/api/auth/signup', 
   async (req: Request<{}, {}, SignupRequestBody>, res: Response): Promise<Response> => {
     const { username, email, password } = req.body;
@@ -371,7 +416,7 @@ app.post(
 // ----------------------------------------------------------------------------
 // USER AUTHENTICATION: LOGIN
 // ----------------------------------------------------------------------------
-app.post(
+publicApp.post(
   '/api/auth/login',
   async (req: Request<{}, {}, LoginRequestBody>, res: Response): Promise<Response> => {
     const { email, password } = req.body;
@@ -457,8 +502,8 @@ app.post(
   }
 );
 
-// Step 1: Request JWT Setup Token
-app.post(
+// Request JWT Setup Token
+publicApp.post(
   '/api/devices/request-setup', 
   async (req: Request<{}, {}, RequestSetupRequestBody>, res: Response): Promise<Response> => {
     const { userId, deviceName } = req.body;
@@ -478,6 +523,7 @@ app.post(
       const setupToken = jwt.sign(
         { 
           userId,
+          scope: 'provisioning',
           deviceName: deviceName.trim(),
           backendUrl,
         },
@@ -490,13 +536,13 @@ app.post(
       });
     } catch (err) {
       console.error('Error initiating device setup:', err);
-      return res.status(500).json({ error: 'Failed to initiate device setup.' });
+      return res.status(500).json({ error: 'Failed to generate JWT.' });
     }
   }
 );
 
 // Step 2: Edge Device verifies JWT after connecting to Wi-Fi
-app.post(
+publicApp.post(
   '/api/devices/verify-setup', 
   async (req: Request<{}, {}, VerifySetupRequestBody>, res: Response): Promise<Response> => {
 
@@ -529,6 +575,10 @@ app.post(
 
     // Statelessly verify signature & expiration
     const decoded = jwt.verify(token, JWT_SECRET) as SetupJwtPayload;
+
+    if (decoded.scope !== 'provisioning') {
+      return res.status(403).send('Invalid token scope for this action');
+    }
 
     // 1. Create temporary device entry to obtain UUID
     const uuidResult = await pool.query<{ id: string }>('SELECT uuid_generate_v4() AS id');
@@ -605,7 +655,7 @@ app.post(
 });
 
 // Get all devices owned by a user
-app.get(
+publicApp.get(
   '/api/devices/:userId', 
   async (req: Request<{ userId: string }>, res: Response): Promise<Response> => {
     const { userId } = req.params;
@@ -627,7 +677,142 @@ app.get(
   }
 );
 
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running at http://0.0.0.0:${PORT}`);
+publicApp.post('/api/v1/devices/register', async (req: Request<{}, {}, RegistrationBody>, res: Response): Promise<any> => {
+    const { csr, /*onboarding_token*/ } = req.body;
+    
+    if (!csr /*|| !onboarding_token*/) {
+        return res.status(400).json({ error: "Missing parameters" });
+    }
+
+    try {
+        // Verify the onboarding token
+        // jwt.verify(onboarding_token, JWT_SECRET) as JwtPayload;
+
+        const csrParam = jsrsasign.KJUR.asn1.csr.CSRUtil.getParam(csr);
+
+        // Read the Common Name (CN) directly from the parsed subject metadata map
+        if (!csrParam || !csrParam.subject || !csrParam.subject.str) {
+            return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR." });
+        }
+        
+        const subjectString: string = csrParam.subject.str;
+
+        const cnMatch = subjectString.match(/CN=([^/]+)/);
+        if (!cnMatch) {
+            return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR string." });
+        }
+        
+        const deviceSerialNumber: string = cnMatch[1]; // Resolves cleanly to "device-12345"
+
+        // Check against our hardware whitelist
+        // if (!HARDWARE_WHITELIST.includes(deviceSerialNumber)) {
+        //     return res.status(403).json({ error: "Hardware not whitelisted" });
+        // }
+
+        // Request signature from your local CFSSL container on port 8888
+        const cfsslResponse = await axios.post<CFSSLSignedResponse>('http://localhost:8888/api/v1/cfssl/sign', {
+            certificate_request: csr,
+            profile: "client"
+        });
+
+        return res.status(200).json({ 
+            status: "success", 
+            certificate: cfsslResponse.data.result.certificate 
+        });
+        
+    } catch (error) {
+        return res.status(401).json({ error: "Unauthorized or server error" });
+    }
+});
+
+
+publicApp.post('/api/factory/registration', async (req: Request, res: Response): Promise<any> => {
+  try {
+
+    const { hardwareId, timestamp, signature } = req.body as FactoryPayload;
+
+    if (!hardwareId || !timestamp || !signature) {
+      return res.status(400).json({ error: 'Missing required cryptographic fields' });
+    }
+
+    // 1. Prevent Replay Attacks: Check if timestamp is within a reasonable window (e.g., 5 minutes)
+    const requestTime = parseInt(timestamp, 10);
+    const currentTime = Math.floor(Date.now() / 1000);
+    if (isNaN(requestTime) || Math.abs(currentTime - requestTime) > 300) {
+      return res.status(403).json({ error: 'Timestamp expired or invalid' });
+    }
+
+    // 2. Recreate the exact message that was signed on the factory machine
+    const message = `${hardwareId}:${timestamp}`;
+
+    // 3. Verify the signature using Node.js crypto
+    const verifier = crypto.createVerify('SHA256');
+    verifier.update(message);
+    verifier.end();
+
+    const isSignatureValid = verifier.verify(
+      {
+        key: PUBLIC_KEY_PEM,
+        format: 'pem',
+        type: 'spki',
+      },
+      Buffer.from(signature, 'hex')
+    );
+
+    if (!isSignatureValid) {
+      return res.status(403).json({ error: 'Cryptographic signature verification failed' });
+    }
+
+    // 4. Signature is valid! Save/Insert into PostgreSQL whitelist
+    const query = `
+      INSERT INTO device_whitelist (hardware_id, status)
+      VALUES ($1, $2)
+      ON CONFLICT (hardware_id) 
+      DO NOTHING
+      RETURNING hardware_id, status
+    `;
+
+    const result = await pool.query(query, [hardwareId, 'pre_authorized']);
+    
+    return res.status(200).json({
+      success: true,
+      message: 'Device verified via asymmetric signature and whitelisted successfully',
+      device: result.rows[0],
+    });
+
+  } catch (error) {
+    console.error('Error verifying factory signature:', error);
+    return res.status(500).json({ error: 'Internal server error during verification' });
+  }
+});
+
+http.createServer(publicApp).listen(80, () => {
+    console.log('🌐 Port 80: Public Enrollment HTTP Server Active');
+});
+
+const mtlsOptions: https.ServerOptions = {
+  key: fs.readFileSync('./certbot-certs/server.key'),
+  cert: fs.readFileSync('./certbot-certs/server.crt'),
+  ca: [fs.readFileSync('./cfssl/cfssl-config/ca.pem')],
+  requestCert: true,       // Force mTLS checking
+  rejectUnauthorized: true // Drop connections withou a valid client certificate
+}
+
+mtlsApp.post('/api/v1/devices/telemetry', (req: Request, res: Response): any => {
+    // Access the verified client certificate via the underlying socket wrapper
+    const socket = req.socket as any; 
+    const clientCert = socket.getPeerCertificate();
+    
+    if (!clientCert || !clientCert.subject) {
+        return res.status(401).json({ error: "Client certificate missing from handshake context" });
+    }
+    
+    const deviceSerial: string = clientCert.subject.CN;
+
+    console.log(`🔒 Port 8443 (mTLS): Secure telemetry received from: ${deviceSerial}`);
+    return res.status(200).json({ status: "success", received: true });
+});
+
+https.createServer(mtlsOptions, mtlsApp).listen(8443, () => {
+    console.log('🔒 Port 8443: Secure mTLS HTTPS Server Active');
 });

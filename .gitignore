@@ -5,3 +5,6 @@ certs/
 *.log
 *.db
 dynamic-security.json
+*.pem
+**/*.csr
+backend/certbot-certs/

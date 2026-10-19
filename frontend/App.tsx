@@ -113,28 +113,28 @@ function useMQTT(mqttInfo?: MqttCredentials) {
         setError(null);
 
         // Parse host and port (e.g. "wss://192.168.1.50:9001" or "192.168.1.50:9001")
-        const rawUrl = config.brokerUrl.replace(/^ws?:\/\//, '').replace(/^mqtts?:\/\//, '');
-        const [host, portStr] = rawUrl.split(':');
-        const port = portStr ? parseInt(portStr, 10) : 9001; // Default WS port
+        // const rawUrl = config.brokerUrl.replace(/^ws?:\/\//, '').replace(/^mqtts?:\/\//, '');
+        // const [host, portStr] = rawUrl.split(':');
+        // const port = portStr ? parseInt(portStr, 10) : 9001; // Default WS port
 
         const options: IClientOptions = {
-          host,
-          port,
-          protocol: 'ws',
-          path: '/', // Mosquitto WebSocket path
+          // path: '/mqtt',
+           path: '/', // Mosquitto WebSocket path
           username: config.username,
           password: config.password,
           clientId: `app_${config.username}_${Math.random().toString(16).substring(2, 8)}`,
-          rejectUnauthorized: false,
+          rejectUnauthorized: true,
           clean: true,
           reconnectPeriod: 5000,
           connectTimeout: 10000,
         };
 
-        const brokerUrl = `ws://${host}:${port}/`;
-        console.log(`[MQTT] Connecting to ${brokerUrl}...`);
+        // const brokerUrl = `ws://${host}:${port}/`;
 
-        const client = mqtt.connect(brokerUrl, options);
+        // const brokerUrl = "wss://situation-rephrase-cusp.ngrok-free.dev";
+        console.log(`[MQTT] Connecting to ${config.brokerUrl}...`);
+
+        const client = mqtt.connect(config.brokerUrl, options);
         clientRef.current = client;
 
         client.on('connect', () => {

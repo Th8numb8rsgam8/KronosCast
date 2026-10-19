@@ -19,70 +19,75 @@ services:
       fi
       "
 
+  cfssl:
+    image: cfssl/cfssl:latest
+    container_name: cfssl_ca
+    entrypoint: >
+      /bin/sh -c "
+        if [ ! -f /etc/cfssl/ca-key.pem ]; then
+          echo 'Initializing fresh production Certificate Authority...';
+          cfssl gencert -initca /etc/cfssl/ca-csr.json | cfssljson -bare /etc/cfssl/ca;
+          cp /etc/cfssl/ca.pem /etc/cfssl-public/ca.pem;
+        fi;
+        echo 'Starting CFSSL Signing Server...';
+        cfssl serve -address=0.0.0.0 -port=8888 -ca=/etc/cfssl/ca.pem -ca-key=/etc/cfssl/ca-key.pem -config=/etc/cfssl/ca-config.json
+      "
+    networks:
+      - iot_production_network
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./cfssl/cfssl-config:/etc/cfssl
+      - ./cfssl/cfssl-public:/etc/cfssl-public
+    restart: unless-stopped
+
   mosquitto:
     image: eclipse-mosquitto:2
     container_name: mosquitto_broker
-    restart: unless-stopped
     depends_on:
       init-dynsec:
         condition: service_completed_successfully
+      cfssl:
+        condition: service_started
     ports:
       - "1883:1883"   # Standard MQTT Port
-      - "8883:8883"   # MQTT over TLS/SSL (For production deployment)
+      - "8883:8883"   # MQTTS over mTLS (Edge Devices)
       - "9001:9001"
+    networks:
+      - iot_production_network
     volumes:
       # Bind mounts to host directories
       - ./eclipse-mosquitto/config:/mosquitto/config
       - ./eclipse-mosquitto/data:/mosquitto/data
       - ./eclipse-mosquitto/log:/mosquitto/log
+      - ./certbot-certs/server.crt:/mosquitto/config/certs/server.crt:ro
+      - ./certbot-certs/server.key:/mosquitto/config/certs/server.key:ro
+      - ./cfssl/cfssl-public:/mosquitto/config/certs/ca_authority:ro
+    restart: unless-stopped
 
-# volumes:
-#   mosquitto_config:
-#   mosquitto_data:
-# 
-# services:
-#   # STEP 1: Runs once to seed dynamic-security.json into the shared volume
-#   init-dynsec:
-#     build:
-#       context: .
-#       dockerfile: Dockerfile
-#     container_name: init_dynsec
-#     environment:
-#       - MQTT_ADMIN_USER=${MQTT_ADMIN_USER:-admin}
-#       - MQTT_ADMIN_PASS=${MQTT_ADMIN_PASS}
-#     # Mount the config volume to the location expected by your generation script
-#     volumes:
-#       - mosquitto_config:/app/config
-#     # Executes ONLY the generator script, then shuts down cleanly
-#     command: npm run generate:dynsec
-# 
-#   # STEP 2: Boots ONLY after init-dynsec completes successfully
-#   mosquitto:
-#     image: eclipse-mosquitto:2
-#     container_name: mosquitto_broker
-#     restart: unless-stopped
-#     depends_on:
-#       init-dynsec:
-#         condition: service_completed_successfully
-#     ports:
-#       - "1883:1883"
-#     volumes:
-#       - mosquitto_config:/mosquitto/config
-#       - mosquitto_data:/mosquitto/data
-# 
-#   # STEP 3: Express Backend (Production)
-#   express_backend:
-#     build:
-#       context: .
-#       dockerfile: Dockerfile
-#     container_name: express_backend
-#     restart: unless-stopped
-#     depends_on:
-#       - mosquitto
-#     ports:
-#       - "3000:3000"
-#     environment:
-#       - MQTT_BROKER_URL=mqtt://mosquitto:1883
-#       - MQTT_ADMIN_USER=${MQTT_ADMIN_USER:-admin}
-#       - MQTT_ADMIN_PASS=${MQTT_ADMIN_PASS}
-#     command: npm start
+  # node_app:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: node_backend
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "8443:8443"
+  #   environment:
+  #     - NODE_ENV=production
+  #     - JWT_SECRET=${JWT_SECRET}
+  #     - DATABASE_URL=${DATABASE_URL}
+  #   networks:
+  #     - iot_production_network
+  #   volumes:
+  #     - ./cfssl/cfssl-public:/app/cfssl-config:ro
+  #     - ./certbot-certs/server.crt:/certs/server.crt:ro
+  #     - ./certbot-certs/server.key:/certs/server.key:ro
+  #   depends_on:
+  #     cfssl:
+  #       condition: service_started
+
+networks:
+  iot_production_network:
+    driver: bridge

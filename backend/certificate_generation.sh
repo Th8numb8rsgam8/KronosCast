@@ -20,6 +20,7 @@ cat <<EOF > server.ext
 authorityKeyIdentifier=keyid,issuer
 basicConstraints=CA:FALSE
 keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
 subjectAltName = @alt_names
 
 [alt_names]
@@ -32,6 +33,28 @@ EOF
 # 2. Sign the server certificate using your CA (valid for 2 years)
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
   -out server.crt -days 730 -sha256 -extfile server.ext
+
+# ==============================================================================
+# 3. GENERATE AND SIGN CLIENT CERTIFICATE
+# ==============================================================================
+# Generate Client Private Key
+openssl genrsa -out client.key 2048
+
+# Generate Client Certificate Signing Request (client.csr)
+openssl req -new -key client.key -out client.csr \
+  -subj "/C=US/ST=State/L=City/O=MyOrg/OU=Development/CN=MyLocalClient"
+
+# Create Client extension file (clients need different usage extensions than servers)
+cat <<EOF > client.ext
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage = digitalSignature, nonRepudiation, keyEncipherment
+extendedKeyUsage = clientAuth
+EOF
+
+# Sign the client certificate using your CA (valid for 2 years)
+openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -out client.crt -days 730 -sha256 -extfile client.ext
 
 chmod 644 ca.crt server.crt
 chmod 600 server.key ca.key
