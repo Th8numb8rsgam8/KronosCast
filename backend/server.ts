@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-import express, { Request, Response, Application } from 'express';
+import express, { Request, Response, Application, NextFunction } from 'express';
 import bcrypt from 'bcrypt';
 import jwt, { Secret, SignOptions, JwtPayload } from 'jsonwebtoken';
 import { Pool, PoolClient, DatabaseError } from 'pg';
@@ -27,9 +27,12 @@ interface FactoryPayload {
   signature: string;
 }
 
-interface RegistrationBody {
-  csr: string;
-  // onboarding_token: string;
+// Extend Express Request type so TypeScript knows about the decoded user payload
+export interface AuthenticatedRequest extends Request {
+  user?: {
+    userId: string;
+    [key: string]: any;
+  };
 }
 
 interface CFSSLSignedResponse {
@@ -61,7 +64,8 @@ export interface DeviceRow {
 export interface SetupJwtPayload extends JwtPayload {
   userId: string;
   backendUrl: string;
-  deviceId: string;
+  deviceName: string;
+  scope: string;
 }
 
 interface SignupRequestBody {
@@ -82,6 +86,7 @@ interface RequestSetupRequestBody {
 
 interface VerifySetupRequestBody {
   hardware_id?: string;
+  csr: string;
 }
 
 // Regex Patterns
@@ -95,6 +100,9 @@ const MQTT_ADMIN_PASS = process.env.MQTT_ADMIN_PASS || 'backend_secret_password'
 
 // Public MQTTS endpoint returned to mobile app
 const MQTT_PUBLIC_URL = process.env.MQTT_PUBLIC_URL;
+
+// Device MQTT URL secured with mTLS 
+const MQTT_DEVICE_URL = process.env.MQTT_DEVICE_URL;
 
 // Load the public key safely on server startup
 const PUBLIC_KEY_PEM = fs.readFileSync('./public_key.pem', 'utf8');
@@ -320,6 +328,213 @@ function buildMqttResponseObject(userId: string, mqttUsername: string, rawMqttPa
   };
 }
 
+export const createDeviceDeleteHandler = (pool: Pool, mqttAdminClient: mqtt.MqttClient) => {
+  return async (req: Request, res: Response): Promise<void> => {
+    const { userId, deviceId } = req.params;
+
+    const client = await pool.connect();
+
+    try {
+      // 1. Fetch the device first to get its hardware_id and mqtt_username
+      const deviceQuery = `
+        SELECT hardware_id, mqtt_username 
+        FROM devices 
+        WHERE id = $1 AND user_id = $2;
+      `;
+      const deviceResult = await client.query(deviceQuery, [deviceId, userId]);
+
+      if (deviceResult.rows.length === 0) {
+        res.status(404).json({ error: 'Device not found or does not belong to this user.' });
+        return;
+      }
+
+      const { hardware_id: hardwareId, mqtt_username: mqttUsername } = deviceResult.rows[0];
+      const roleName = `role_device_${deviceId}`;
+
+      // Start database transaction
+      await client.query('BEGIN');
+
+      // 2. Delete the device from the devices table
+      const deleteDeviceQuery = `
+        DELETE FROM devices 
+        WHERE id = $1 AND user_id = $2;
+      `;
+      await client.query(deleteDeviceQuery, [deviceId, userId]);
+
+      // 3. Update the device_whitelist table: 
+      // Reset status to 'pre_authorized', clear user_id and registration timestamps
+      const updateWhitelistQuery = `
+        UPDATE device_whitelist 
+        SET status = 'pre_authorized', 
+            user_id = NULL, 
+            registered_at = NULL 
+        WHERE hardware_id = $1;
+      `;
+      await client.query(updateWhitelistQuery, [hardwareId]);
+
+      // Commit the database transaction first
+      await client.query('COMMIT');
+
+      // 4. Remove MQTT credentials from Mosquitto Dynamic Security
+      // Mosquitto dynamic security commands: deleteClient and deleteRole
+      if (mqttUsername) {
+        const deleteClientCmd = {
+          commands: [
+            {
+              command: 'deleteClient',
+              username: mqttUsername,
+            }
+          ]
+        };
+
+        const deleteRoleCmd = {
+          commands: [
+            {
+              command: 'deleteRole',
+              rolename: roleName,
+            }
+          ]
+        };
+
+        // Publish deletion commands to Mosquitto control topic
+        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(deleteClientCmd));
+        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(deleteRoleCmd));
+      }
+
+      res.status(200).json({ 
+        success: true, 
+        message: 'Device successfully deleted, whitelist reset, and MQTT credentials revoked.' 
+      });
+
+    } catch (error) {
+      // Rollback database transaction on failure
+      await client.query('ROLLBACK');
+      console.error('[Database/MQTT Error] Failed to delete device:', error);
+      res.status(500).json({ error: 'Internal server error while deleting device.' });
+    } finally {
+      // Release client back to the pool
+      client.release();
+    }
+  };
+};
+
+export const verifyJwtMiddleware = (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Unauthorized: Missing or malformed Bearer token.' });
+    return;
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    // Verify token signature and expiration using your secret key
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'YOUR_JWT_SECRET') as { userId: string };
+    
+    // Attach decoded info to the request object
+    req.user = decoded;
+    next();
+  } catch (err) {
+    res.status(403).json({ error: 'Forbidden: Invalid or expired token.' });
+    return;
+  }
+};
+
+export const createUserAccountDeleteHandler = (pool: Pool, mqttAdminClient: any) => {
+  return async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    const { userId } = req.params;
+
+    // 🔒 Security Check: Ensure the authenticated user matches the requested account deletion ID
+    if (req.user?.userId !== userId) {
+      res.status(403).json({ error: 'Forbidden: You can only delete your own account.' });
+      return;
+    }
+
+    const client = await pool.connect();
+
+    try {
+      // 1. Fetch user info and all associated devices to clean up MQTT & Whitelists properly
+      const userQuery = `SELECT mqtt_username FROM users WHERE id = $1;`;
+      const userResult = await client.query(userQuery, [userId]);
+
+      if (userResult.rows.length === 0) {
+        res.status(404).json({ error: 'User not found.' });
+        return;
+      }
+
+      const userMqttUsername = userResult.rows[0].mqtt_username;
+
+      const devicesQuery = `SELECT id, hardware_id, mqtt_username FROM devices WHERE user_id = $1;`;
+      const devicesResult = await client.query(devicesQuery, [userId]);
+      const devices = devicesResult.rows;
+
+      // Start database transaction
+      await client.query('BEGIN');
+
+      // 2. Reset device_whitelist entries for all devices owned by this user
+      for (const device of devices) {
+        await client.query(
+          `UPDATE device_whitelist 
+           SET status = 'pre_authorized', 
+               user_id = NULL, 
+               registered_at = NULL 
+           WHERE hardware_id = $1`,
+          [device.hardware_id]
+        );
+      }
+
+      // 3. Delete the user from the database. 
+      // Note: Because of `ON DELETE CASCADE` on your devices table foreign key, 
+      // deleting the user will automatically drop all rows in the devices table.
+      await client.query(`DELETE FROM users WHERE id = $1;`, [userId]);
+
+      // Commit the database transaction
+      await client.query('COMMIT');
+
+      // 4. Clean up Mosquitto Dynamic Security for all devices
+      for (const device of devices) {
+        const roleName = `role_device_${device.id}`;
+        
+        if (device.mqtt_username) {
+          mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+            commands: [{ command: 'deleteClient', username: device.mqtt_username }]
+          }));
+        }
+
+        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+          commands: [{ command: 'deleteRole', rolename: roleName }]
+        }));
+      }
+
+      // 5. Clean up Mosquitto Dynamic Security for the user account itself
+      if (userMqttUsername) {
+        const userRoleName = `role_user_${userId}`;
+
+        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+          commands: [{ command: 'deleteClient', username: userMqttUsername }]
+        }));
+
+        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+          commands: [{ command: 'deleteRole', rolename: userRoleName }]
+        }));
+      }
+
+      res.status(200).json({ 
+        success: true, 
+        message: 'Account, associated devices, whitelist records, and all MQTT credentials successfully deleted.' 
+      });
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('[Database/MQTT Error] Failed to delete user account:', error);
+      res.status(500).json({ error: 'Internal server error while deleting account.' });
+    } finally {
+      client.release();
+    }
+  };
+};
+
 publicApp.get(
   '/health', 
   async (_req: Request, res: Response): Promise<Response> => {
@@ -336,6 +551,16 @@ publicApp.get(
   }
 });
 
+publicApp.delete(
+  '/api/devices/:userId/:deviceId', 
+  createDeviceDeleteHandler(pool, mqttAdminClient)
+);
+
+publicApp.delete(
+  '/api/users/:userId', 
+  verifyJwtMiddleware,
+  createUserAccountDeleteHandler(pool, mqttAdminClient)
+);
 
 // User Signup Endpoint
 publicApp.post(
@@ -541,7 +766,7 @@ publicApp.post(
   }
 );
 
-// Step 2: Edge Device verifies JWT after connecting to Wi-Fi
+// Edge Device registers after connecting to Wi-Fi and gets MQTT Credentials and an mTLS certificate
 publicApp.post(
   '/api/devices/verify-setup', 
   async (req: Request<{}, {}, VerifySetupRequestBody>, res: Response): Promise<Response> => {
@@ -559,12 +784,26 @@ publicApp.post(
   const token = authHeader.split(' ')[1];
 
   // 3. Extract hardware_id from the JSON request body
-  const { hardware_id } = req.body;
+  const { hardware_id, csr } = req.body;
 
-  if (!hardware_id) {
+  if (!hardware_id || !csr) {
     return res.status(400).json({ 
-      error: 'Bad Request: Missing hardware_id in request body.' 
+      error: 'Bad Request: Missing hardware_id or CSR in request body.' 
     });
+  }
+
+  const csrParam = jsrsasign.KJUR.asn1.csr.CSRUtil.getParam(csr);
+
+  // Read the Common Name (CN) directly from the parsed subject metadata map
+  if (!csrParam || !csrParam.subject || !csrParam.subject.str) {
+      return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR." });
+  }
+        
+  const subjectString: string = csrParam.subject.str;
+
+  const cnMatch = subjectString.match(/CN=([^/]+)/);
+  if (!cnMatch) {
+      return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR string." });
   }
 
   const client: PoolClient = await pool.connect();
@@ -577,14 +816,43 @@ publicApp.post(
     const decoded = jwt.verify(token, JWT_SECRET) as SetupJwtPayload;
 
     if (decoded.scope !== 'provisioning') {
+      await client.query('ROLLBACK');
       return res.status(403).send('Invalid token scope for this action');
     }
 
-    // 1. Create temporary device entry to obtain UUID
+    // ─────────────────────────────────────────────────────────────
+    // Check device_whitelist for hardware_id validity
+    // ─────────────────────────────────────────────────────────────
+    const whitelistResult = await client.query(
+      `SELECT id, status
+       FROM device_whitelist 
+       WHERE hardware_id = $1`,
+      [hardware_id]
+    );
+
+    if (whitelistResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Forbidden: Hardware ID is not whitelisted.' });
+    }
+
+    const whitelistEntry = whitelistResult.rows[0];
+
+    if (whitelistEntry.status !== 'pre_authorized' || whitelistEntry.user_id !== null) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Device is already registered, revoked, or no longer pre-authorized.' });
+    }
+
+    // Request signature from your local CFSSL container on port 8888
+    const cfsslResponse = await axios.post<CFSSLSignedResponse>('http://localhost:8888/api/v1/cfssl/sign', {
+        certificate_request: csr,
+        profile: "client"
+    });
+
+    // Create temporary device entry to obtain UUID
     const uuidResult = await pool.query<{ id: string }>('SELECT uuid_generate_v4() AS id');
     const deviceId = uuidResult.rows[0].id;
 
-    // 2. Insert device into database
+    // Insert device into database
     const newDevice = await pool.query<Pick<DeviceRow, 'id' | 'user_id' | 'device_name'>>(
       `INSERT INTO devices (id, user_id, device_name, hardware_id) 
        VALUES ($1, $2, $3, $4) 
@@ -603,7 +871,19 @@ publicApp.post(
       `UPDATE devices 
        SET mqtt_username = $1, mqtt_password_hash = $2 
        WHERE id = $3`,
-      [mqttUsername, mqttPasswordHash || null, device.id]
+      [mqttUsername, mqttPasswordHash, device.id]
+    );
+
+    // ─────────────────────────────────────────────────────────────
+    // Update device_whitelist to link user and mark as active
+    // ─────────────────────────────────────────────────────────────
+    await client.query(
+      `UPDATE device_whitelist 
+       SET status = 'active', 
+           user_id = $1, 
+           registered_at = NOW() 
+       WHERE hardware_id = $2`,
+      [decoded.userId, hardware_id]
     );
 
     await client.query('COMMIT');
@@ -619,15 +899,16 @@ publicApp.post(
         deviceName: device.device_name,
       },
       mqtt: {
-        brokerUrl: MQTT_PUBLIC_URL,
+        brokerUrl: MQTT_DEVICE_URL,
         username: mqttUsername,
-        password: rawMqttPassword || undefined, // Only returned on initial provisioning
+        password: rawMqttPassword,
         topics: {
           telemetry: topics.telemetry,
           status: topics.status,
           commands: topics.commands,
         }
-      }
+      },
+      certificate: cfsslResponse.data.result.certificate 
     });
 
   } catch (err: unknown) {
@@ -676,55 +957,6 @@ publicApp.get(
     }
   }
 );
-
-publicApp.post('/api/v1/devices/register', async (req: Request<{}, {}, RegistrationBody>, res: Response): Promise<any> => {
-    const { csr, /*onboarding_token*/ } = req.body;
-    
-    if (!csr /*|| !onboarding_token*/) {
-        return res.status(400).json({ error: "Missing parameters" });
-    }
-
-    try {
-        // Verify the onboarding token
-        // jwt.verify(onboarding_token, JWT_SECRET) as JwtPayload;
-
-        const csrParam = jsrsasign.KJUR.asn1.csr.CSRUtil.getParam(csr);
-
-        // Read the Common Name (CN) directly from the parsed subject metadata map
-        if (!csrParam || !csrParam.subject || !csrParam.subject.str) {
-            return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR." });
-        }
-        
-        const subjectString: string = csrParam.subject.str;
-
-        const cnMatch = subjectString.match(/CN=([^/]+)/);
-        if (!cnMatch) {
-            return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR string." });
-        }
-        
-        const deviceSerialNumber: string = cnMatch[1]; // Resolves cleanly to "device-12345"
-
-        // Check against our hardware whitelist
-        // if (!HARDWARE_WHITELIST.includes(deviceSerialNumber)) {
-        //     return res.status(403).json({ error: "Hardware not whitelisted" });
-        // }
-
-        // Request signature from your local CFSSL container on port 8888
-        const cfsslResponse = await axios.post<CFSSLSignedResponse>('http://localhost:8888/api/v1/cfssl/sign', {
-            certificate_request: csr,
-            profile: "client"
-        });
-
-        return res.status(200).json({ 
-            status: "success", 
-            certificate: cfsslResponse.data.result.certificate 
-        });
-        
-    } catch (error) {
-        return res.status(401).json({ error: "Unauthorized or server error" });
-    }
-});
-
 
 publicApp.post('/api/factory/registration', async (req: Request, res: Response): Promise<any> => {
   try {
@@ -795,7 +1027,7 @@ const mtlsOptions: https.ServerOptions = {
   cert: fs.readFileSync('./certbot-certs/server.crt'),
   ca: [fs.readFileSync('./cfssl/cfssl-config/ca.pem')],
   requestCert: true,       // Force mTLS checking
-  rejectUnauthorized: true // Drop connections withou a valid client certificate
+  rejectUnauthorized: true // Drop connections without a valid client certificate
 }
 
 mtlsApp.post('/api/v1/devices/telemetry', (req: Request, res: Response): any => {

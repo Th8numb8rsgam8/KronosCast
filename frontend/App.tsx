@@ -16,7 +16,6 @@ import {
 import { BleManager, Device, Subscription, BleError } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 import mqtt, { MqttClient, IClientOptions } from 'mqtt';
-import { join } from 'path';
 
 export interface MqttCredentials {
   brokerUrl: string;
@@ -475,6 +474,79 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
     });
   };
 
+  const handleDeleteDevice = (deviceId: string, deviceName: string) => {
+    Alert.alert(
+      'Delete Device',
+      `Are you sure you want to remove "${deviceName}"?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const response = await fetch(`${BACKEND_URL}/api/devices/${user.id}/${deviceId}`, {
+                method: 'DELETE',
+              });
+              
+              if (response.ok) {
+                // Remove the device from local state immediately
+                setDevices((prevDevices) => prevDevices.filter((d) => d.id !== deviceId));
+                
+                // If the currently selected device is the one being deleted, close the panel
+                if (selectedDevice?.id === deviceId) {
+                  setSelectedDevice(null);
+                }
+                
+                Alert.alert('Success', 'Device removed successfully.');
+              } else {
+                Alert.alert('Error', 'Failed to delete the device on the server.');
+              }
+            } catch (err) {
+              console.error('Delete error:', err);
+              Alert.alert('Error', 'Network error while deleting device.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleDeleteAccount = () => {
+    Alert.alert(
+      'Delete Account',
+      'Are you sure you want to permanently delete your account? This will remove all your devices, data, and MQTT credentials. This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete Permanently',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // Assuming authState contains the JWT token and user ID
+              const response = await fetch(`${BACKEND_URL}/api/users/${user.id}`, {
+                method: 'DELETE',
+                headers: {
+                  'Authorization': `Bearer ${authState.token}`, // Pass your token for security
+                },
+              });
+
+              if (response.ok) {
+                Alert.alert('Account Deleted', 'Your account has been successfully removed.');
+                onLogout(); // Clears authState and returns to login screen
+              } else {
+                Alert.alert('Error', 'Failed to delete account on the server.');
+              }
+            } catch (err) {
+              console.error('Account deletion error:', err);
+              Alert.alert('Error', 'Network error while attempting to delete account.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const renderDeviceItem: ListRenderItem<DeviceItem> = ({ item }) => {
     const isSelected = selectedDevice?.id === item.id;
     const liveStatus = deviceStatusMap[item.id] || 'offline';
@@ -486,14 +558,28 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
         onPress={() => setSelectedDevice(item)}
       >
         <View style={styles.cardHeaderRow}>
-          <Text style={styles.deviceName}>{item.device_name}</Text>
-          {/* Status Indicator Dot */}
-          <View style={styles.statusIndicatorContainer}>
-            <View style={[styles.dot, { backgroundColor: isOnline ? '#4CD964' : '#FF3B30' }]} />
-            <Text style={[styles.onlineStatusText, { color: isOnline ? '#2e7d32' : '#c62828' }]}>
-              {isOnline ? 'Online' : 'Offline'}
-            </Text>
+          <View>
+            <Text style={styles.deviceName}>{item.device_name}</Text>
+            {/* Status Indicator Dot */}
+            <View style={styles.statusIndicatorContainer}>
+              <View style={[styles.dot, { backgroundColor: isOnline ? '#4CD964' : '#FF3B30' }]} />
+              <Text style={[styles.onlineStatusText, { color: isOnline ? '#2e7d32' : '#c62828' }]}>
+                {isOnline ? 'Online' : 'Offline'}
+              </Text>
+            </View>
           </View>
+
+          {/* Delete Button */}
+          <TouchableOpacity 
+            style={styles.deleteButton} 
+            onPress={(e) => {
+              // e.stopPropagation ensures clicking delete doesn't trigger the card's onPress selection
+              e.stopPropagation?.();
+              handleDeleteDevice(item.id, item.device_name);
+            }}
+          >
+            <Text style={styles.deleteButtonText}>🗑️</Text>
+          </TouchableOpacity>
         </View>
       </TouchableOpacity>
     );
@@ -520,9 +606,18 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
     <View style={styles.dashboardContainer}>
       <View style={styles.headerRow}>
         <Text style={styles.welcomeText}>Hello, {user.username}</Text>
-        <TouchableOpacity onPress={onLogout}>
-          <Text style={styles.logoutText}>Logout</Text>
-        </TouchableOpacity>
+  
+        <View style={styles.headerActionsRow}>
+          {/* Delete Account Button */}
+          <TouchableOpacity onPress={handleDeleteAccount} style={[styles.actionButton, styles.deleteButtonOutline]}>
+            <Text style={styles.deleteButtonText}>Delete Account</Text>
+          </TouchableOpacity>
+          
+          {/* Logout Button */}
+          <TouchableOpacity onPress={onLogout} style={[styles.actionButton, styles.logoutButtonOutline]}>
+            <Text style={styles.logoutButtonText}>Logout</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.statusBadge}>
@@ -548,6 +643,7 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
           keyExtractor={(item: DeviceItem) => item.id}
           renderItem={renderDeviceItem}
           ListEmptyComponent={<Text style={styles.emptyText}>No devices added yet.</Text>}
+          contentContainerStyle={{ paddingBottom: 20 }}
         />
       )}
 
@@ -1005,6 +1101,43 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    marginTop: 4,
+  },
+  deleteButton: {
+    padding: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  headerActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8, // Space between the two buttons
+  },
+  actionButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  deleteButtonOutline: {
+    borderColor: '#FF3B30',
+    backgroundColor: '#FFF2F2', // Soft red tint background
+  },
+  deleteButtonText: {
+    color: '#FF3B30',
+    fontWeight: '600',
+    fontSize: 12,
+  },
+  logoutButtonOutline: {
+    borderColor: '#007AFF',
+    backgroundColor: '#F0F6FF', // Soft blue tint background
+  },
+  logoutButtonText: {
+    color: '#007AFF',
+    fontWeight: '600',
+    fontSize: 12,
   },
   dot: {
     width: 10,
