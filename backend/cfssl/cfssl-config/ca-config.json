@@ -10,7 +10,8 @@
           "signing",
           "key encipherment",
           "client auth"
-        ]
+        ],
+        "copy_extensions": false
       }
     }
   }
