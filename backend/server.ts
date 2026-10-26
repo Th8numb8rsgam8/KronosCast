@@ -14,6 +14,9 @@ import http from 'http';
 import fs from 'fs';
 import * as jsrsasign from 'jsrsasign';
 
+import { S3Client, GetObjectCommand, ListObjectsV2Command, S3 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
 const publicApp: Application = express();
 publicApp.set('trust proxy', 'loopback'); // Trust the loopback interface for proxy headers
 publicApp.use(express.json());
@@ -1062,9 +1065,6 @@ publicApp.post('/api/factory/registration', async (req: Request, res: Response):
   }
 });
 
-http.createServer(publicApp).listen(80, () => {
-    console.log('🌐 Port 80: Public Enrollment HTTP Server Active');
-});
 
 const mtlsOptions: https.ServerOptions = {
   key: fs.readFileSync('./certbot-certs/server.key'),
@@ -1126,6 +1126,78 @@ mtlsApp.post('/api/v1/devices/mqtt-request', async (req: Request, res: Response)
         }
       },
     });
+});
+
+// Initialize the S3 client configured for DigitalOcean Spaces
+const spacesClient = new S3Client({
+  region: 'sfo3',
+  endpoint: process.env.DIGITAL_OCEAN_SPACES_ENDPOINT, 
+  forcePathStyle: true,
+  credentials: {
+    accessKeyId: process.env.DIGITAL_OCEAN_SPACES_ACCESS_KEY_ID || '',
+    secretAccessKey: process.env.DIGITAL_OCEAN_SPACES_ACCESS_KEY_SECRET || '',
+  },
+});
+
+export const createPlaylistJsonHandler = (pool: Pool) => {
+  return async (req: Request, res: Response): Promise<void> => {
+    const client = await pool.connect();
+
+    try {
+      // // 1. Fetch your dynamic playlist sequence from PostgreSQL
+      // const result = await client.query(
+      //   'SELECT id, s3_key, file_name FROM playlist_videos ORDER BY position ASC;'
+      // );
+
+      // if (result.rows.length === 0) {
+      //   res.status(404).json({ error: 'No videos found in the active playlist.' });
+      //   return;
+      // }
+
+      // const listCommand = new ListObjectsV2Command( {Bucket: process.env.DIGITAL_OCEAN_SPACES_BUCKET_NAME });
+      // const response = await spacesClient.send(listCommand);
+
+      const videos: string[] = ["video_1.mp4", "video_2.mp4"];
+
+      // 2. Generate a secure, time-bound presigned URL for each video in parallel
+      const playlistPromises = videos.map(async (video) => {
+        const s3Command = new GetObjectCommand({
+          Bucket: process.env.DIGITAL_OCEAN_SPACES_BUCKET_NAME,
+          Key: video, // e.g. "video_1.mp4" (root directory)
+        });
+
+        const object = await spacesClient.send(s3Command);
+
+        // URL expires in 2 hours (7200 seconds)
+        const presignedUrl = await getSignedUrl(spacesClient, s3Command, { expiresIn: 7200 });
+
+        return {
+          title: video,
+          url: presignedUrl,
+        };
+      });
+
+      const playlist = await Promise.all(playlistPromises);
+
+      // 3. Return the array as clean JSON to the Raspberry Pi
+      res.status(200).json(playlist);
+    } catch (err) {
+      console.error('[Playlist Generation Error] Failed to create presigned playlist:', err);
+      res.status(500).json({ error: 'Internal server error generating playlist.' });
+    } finally {
+      client.release();
+    }
+  };
+};
+
+mtlsApp.get(
+  '/api/stream/playlist',
+  // createInfinitePlaylistStreamHandler(pool)
+  createPlaylistJsonHandler(pool)
+);
+
+http.createServer(publicApp).listen(80, () => {
+    console.log('🌐 Port 80: Public Enrollment HTTP Server Active');
 });
 
 https.createServer(mtlsOptions, mtlsApp).listen(8443, () => {

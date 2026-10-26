@@ -16,6 +16,8 @@ import {
 import { BleManager, Device, Subscription, BleError } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 import mqtt, { MqttClient, IClientOptions } from 'mqtt';
+import * as SecureStore from 'expo-secure-store';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface MqttCredentials {
   brokerUrl: string;
@@ -69,6 +71,83 @@ interface DeviceCommand {
   actionValue: string;
   buttonColor?: string;
 }
+
+const AUTH_STATE_KEY = '@app_auth_state';
+
+export const authStorage = {
+  // Save full session upon successful login/signup
+  async saveSession(authData: AuthState): Promise<void> {
+    try {
+      // 1. Isolate high-security credentials for SecureStore
+      if (authData.token) {
+        await SecureStore.setItemAsync('jwt_token', authData.token);
+      }
+      if (authData.mqtt?.password) {
+        await SecureStore.setItemAsync('mqtt_password', authData.mqtt.password);
+      }
+
+      // 2. Store non-sensitive metadata (user info, broker URL, topics) in AsyncStorage
+      const publicData = {
+        user: authData.user,
+        mqtt: authData.mqtt ? {
+          brokerUrl: authData.mqtt.brokerUrl,
+          username: authData.mqtt.username,
+          topics: authData.mqtt.topics,
+          // password omitted here intentionally
+        } : undefined,
+      };
+
+      console.log(publicData);
+
+      await AsyncStorage.setItem(AUTH_STATE_KEY, JSON.stringify(publicData));
+    } catch (error) {
+      console.error('[Storage] Failed to save auth session:', error);
+    }
+  },
+
+  // Rebuild the complete AuthState on app boot by stitching SecureStore and AsyncStorage together
+  async getSession(): Promise<AuthState | null> {
+    try {
+      const storedPublicData = await AsyncStorage.getItem(AUTH_STATE_KEY);
+      console.log(`STORED PUBLIC DATA ${storedPublicData}`);
+      if (!storedPublicData) return null;
+
+      const parsed = JSON.parse(storedPublicData);
+
+      // Fetch sensitive elements from hardware-backed secure storage
+      const token = (await SecureStore.getItemAsync('jwt_token')) || undefined;
+      const mqttPassword = (await SecureStore.getItemAsync('mqtt_password')) || '';
+
+      console.log(`TOKEN ${token}}`);
+      console.log(`MQTT Password ${mqttPassword}`);
+
+      if (!token) return null; // If token is missing/expired from keychain, force re-login
+
+      return {
+        user: parsed.user,
+        token: token,
+        mqtt: parsed.mqtt ? {
+          ...parsed.mqtt,
+          password: mqttPassword,
+        } : undefined,
+      };
+    } catch (error) {
+      console.error('[Storage] Failed to retrieve auth session:', error);
+      return null;
+    }
+  },
+
+  // Clear everything on logout or account deletion
+  async clearSession(): Promise<void> {
+    try {
+      await SecureStore.deleteItemAsync('jwt_token');
+      await SecureStore.deleteItemAsync('mqtt_password');
+      await AsyncStorage.removeItem(AUTH_STATE_KEY);
+    } catch (error) {
+      console.error('[Storage] Failed to clear session:', error);
+    }
+  }
+};
 
 const AVAILABLE_COMMANDS: DeviceCommand[] = [
   { label: 'StreamSwitch On', actionValue: 'STREAMSWITCH_ON', buttonColor: '#007AFF' },
@@ -191,12 +270,55 @@ function useMQTT(mqttInfo?: MqttCredentials) {
 
 export default function App(): React.ReactElement {
   const [authState, setAuthState] = useState<AuthState | null>(null);
+  const [isInitializing, setIsInitializing] = useState<boolean>(true);
 
-  if (!authState) {
-    return <AuthScreen onAuthSuccess={(data: AuthState) => setAuthState(data)} />;
+  // Check storage on cold app start
+  useEffect(() => {
+    async function restoreSession() {
+      try {
+        const savedSession = await authStorage.getSession();
+        console.log(savedSession);
+        if (savedSession) {
+          setAuthState(savedSession);
+        }
+      } catch (e) {
+        console.log('[App] No active session found.');
+      } finally {
+        setIsInitializing(false);
+      }
+    }
+
+    restoreSession();
+  }, []);
+
+  if (isInitializing) {
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0b0f19' }}>
+        <ActivityIndicator size="large" color="#3b82f6" />
+      </View>
+    );
   }
 
-  return <DeviceDashboard authState={authState} onLogout={() => setAuthState(null)} />;
+  if (!authState) {
+    return (
+      <AuthScreen 
+        onAuthSuccess={async (data: AuthState) => {
+          await authStorage.saveSession(data); // Persist securely on login
+          setAuthState(data);
+        }} 
+      />
+    );
+  }
+
+  return (
+    <DeviceDashboard 
+      authState={authState} 
+      onLogout={async () => {
+        await authStorage.clearSession(); // Wipe secure data on logout
+        setAuthState(null);
+      }} 
+    />
+  );
 }
 
 // ----------------------------------------------------------------------------
@@ -278,13 +400,15 @@ function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.ReactElement {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>{isLoginMode ? 'IoT User Login' : 'IoT User Registration'}</Text>
+      <Text style={styles.brandTitle}>KRONOS</Text>
+      <Text style={styles.title}>{isLoginMode ? 'Welcome Back' : 'Create Account'}</Text>
+      <Text style={styles.subtitle}>{isLoginMode ? 'Sign in to monitor your IoT edge devices' : 'Register to get started'}</Text>
 
       <View style={styles.form}>
         {!isLoginMode && (<TextInput
           style={styles.input}
           placeholder="Username"
-          placeholderTextColor="#888"
+          placeholderTextColor="#64748b"
           value={username}
           onChangeText={setUsername}
           autoCapitalize="none"
@@ -294,7 +418,7 @@ function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.ReactElement {
         <TextInput
           style={styles.input}
           placeholder="Email Address"
-          placeholderTextColor="#888"
+          placeholderTextColor="#64748b"
           value={email}
           onChangeText={setEmail}
           autoCapitalize="none"
@@ -304,7 +428,7 @@ function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.ReactElement {
         <TextInput
           style={styles.input}
           placeholder="Password"
-          placeholderTextColor="#888"
+          placeholderTextColor="#64748b"
           value={password}
           onChangeText={setPassword}
           secureTextEntry
@@ -344,11 +468,11 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
 
   // Store telemetry for ALL devices mapped by deviceId: { [deviceId]: payload }
   const [deviceTelemetryMap, setDeviceTelemetryMap] = useState<Record<string, any>>({});
+
   // Store status for ALL devices mapped by deviceId: { [deviceId]: status }
   const [deviceStatusMap, setDeviceStatusMap] = useState<Record<string, string>>({});
 
   // Track timestamp of the last received packet per device to calculate timeouts
-  // const [deviceLastSeenMap, setDeviceLastSeenMap] = useState<Record<string, number>>({});
   const deviceLastSeenRef = useRef<Record<string, number>>({});
 
   // Initialize MQTT over TLS automatically using auth credentials
@@ -368,7 +492,7 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
 
         Object.keys(nextStatus).forEach((deviceId) => {
           const lastSeen = deviceLastSeenRef.current[deviceId] || 0;
-          //const lastSeen = deviceLastSeenMap[deviceId] || 0;
+
           // If active for more than 15 seconds without communication, set offline
           if (nextStatus[deviceId] === 'online' && now - lastSeen > 15000) {
             nextStatus[deviceId] = 'offline';
@@ -410,10 +534,8 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
         if (deviceIdIndex > 0 && segments[deviceIdIndex]) {
           const deviceId = segments[deviceIdIndex];
           const subType = segments[segments.length - 1];
-          // const now = Date.now();
 
           // Update last seen timestamp
-          // setDeviceLastSeenMap((prev) => ({ ...prev, [deviceId]: now }));
           deviceLastSeenRef.current[deviceId] = Date.now();
 
           if (subType === 'telemetry') {
@@ -453,7 +575,6 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
   };
 
   // Construct dynamic command topic using your template format:
-  // commandPublish: "users/{userId}/devices/{deviceId}/commands"
   const handleSendCommand = (actionValue: string) => {
     if (!selectedDevice || !mqttInfo || !client) return;
     
@@ -466,7 +587,6 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
     // Call publish directly on the mqtt client instance
     client.publish(commandTopic, payload, { qos: 1 }, (err) => {
       if (err) {
-        console .error('[MQTT] Failed to publish command:', err);
         Alert.alert('Error', 'Failed to send command.');
       } else {
         Alert.alert('Command Sent', `Sent '${actionValue}' to ${selectedDevice.device_name}`);
@@ -503,7 +623,6 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
                 Alert.alert('Error', 'Failed to delete the device on the server.');
               }
             } catch (err) {
-              console.error('Delete error:', err);
               Alert.alert('Error', 'Network error while deleting device.');
             }
           },
@@ -515,7 +634,7 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
   const handleDeleteAccount = () => {
     Alert.alert(
       'Delete Account',
-      'Are you sure you want to permanently delete your account? This will remove all your devices, data, and MQTT credentials. This action cannot be undone.',
+      'Permanently delete your account and associated devices? This cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -532,13 +651,13 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
               });
 
               if (response.ok) {
-                Alert.alert('Account Deleted', 'Your account has been successfully removed.');
+                // Alert.alert('Account Deleted', 'Your account has been successfully removed.');
                 onLogout(); // Clears authState and returns to login screen
               } else {
                 Alert.alert('Error', 'Failed to delete account on the server.');
               }
             } catch (err) {
-              console.error('Account deletion error:', err);
+              // console.error('Account deletion error:', err);
               Alert.alert('Error', 'Network error while attempting to delete account.');
             }
           },
@@ -562,8 +681,8 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
             <Text style={styles.deviceName}>{item.device_name}</Text>
             {/* Status Indicator Dot */}
             <View style={styles.statusIndicatorContainer}>
-              <View style={[styles.dot, { backgroundColor: isOnline ? '#4CD964' : '#FF3B30' }]} />
-              <Text style={[styles.onlineStatusText, { color: isOnline ? '#2e7d32' : '#c62828' }]}>
+              <View style={[styles.dot, { backgroundColor: isOnline ? '#10b981' : '#ef4444' }]} />
+              <Text style={[styles.onlineStatusText, { color: isOnline ? '#34d399' : '#f87171' }]}>
                 {isOnline ? 'Online' : 'Offline'}
               </Text>
             </View>
@@ -578,7 +697,7 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
               handleDeleteDevice(item.id, item.device_name);
             }}
           >
-            <Text style={styles.deleteButtonText}>🗑️</Text>
+            <Text>🗑️</Text>
           </TouchableOpacity>
         </View>
       </TouchableOpacity>
@@ -587,7 +706,7 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
 
   const renderTelemetryData = (telemetryObj: any) => {
     if (!telemetryObj || typeof telemetryObj !== 'object') {
-      return <Text style={styles.telemetryPlaceholder}>Waiting for telemetry data...</Text>;
+      return <Text style={styles.telemetryPlaceholder}>Waiting for telemetry metrics...</Text>;
     }
 
     return (
@@ -605,15 +724,15 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
   return (
     <View style={styles.dashboardContainer}>
       <View style={styles.headerRow}>
-        <Text style={styles.welcomeText}>Hello, {user.username}</Text>
+        <View>
+          <Text style={styles.greetingLabel}>CONNECTED USER</Text>
+          <Text style={styles.welcomeText}>{user.username}</Text>
+        </View>
   
         <View style={styles.headerActionsRow}>
-          {/* Delete Account Button */}
           <TouchableOpacity onPress={handleDeleteAccount} style={[styles.actionButton, styles.deleteButtonOutline]}>
-            <Text style={styles.deleteButtonText}>Delete Account</Text>
+            <Text style={styles.deleteButtonText}>Delete</Text>
           </TouchableOpacity>
-          
-          {/* Logout Button */}
           <TouchableOpacity onPress={onLogout} style={[styles.actionButton, styles.logoutButtonOutline]}>
             <Text style={styles.logoutButtonText}>Logout</Text>
           </TouchableOpacity>
@@ -621,11 +740,12 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
       </View>
 
       <View style={styles.statusBadge}>
+        <View style={[styles.dot, { backgroundColor: isConnected ? '#10b981' : '#f59e0b' }]} />
         <Text style={styles.statusLabel}>MQTT Broker: </Text>
         {isConnected ? (
           <Text style={styles.statusConnected}>Connected</Text>
         ) : (
-            <ActivityIndicator size="small" color="#007AFF" />
+            <ActivityIndicator size="small" color="#3b82f6" style={{ marginLeft: 6 }} />
         )}
       </View>
 
@@ -636,7 +756,7 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
       <Text style={styles.sectionTitle}>Your Devices</Text>
 
       {fetching ? (
-        <ActivityIndicator color="#007AFF" style={{ marginTop: 20 }} />
+        <ActivityIndicator color="#3b82f6" style={{ marginTop: 20 }} />
       ) : (
         <FlatList
           data={devices}
@@ -655,19 +775,20 @@ function DeviceDashboard({ authState, onLogout }: DeviceDashboardProps) {
               <Text style={styles.closePanelText}>Close</Text>
             </TouchableOpacity>
           </View>
-          
-          <Text style={styles.panelSubHeader}>Live Telemetry Metrics:</Text>
+            
+          <Text style={styles.panelSubHeader}>Live Telemetry Metrics</Text>
           <View style={styles.telemetryContainer}>
             {renderTelemetryData(deviceTelemetryMap[selectedDevice.id])}
           </View>
 
-          <Text style={styles.panelSubHeader}>Available Actions:</Text>
+          <Text style={styles.panelSubHeader}>Actions & Commands</Text>
           <View style={styles.commandGrid}>
             {AVAILABLE_COMMANDS.map((cmd) => (
               <TouchableOpacity 
                 key={cmd.actionValue}
-                style={[styles.gridButton, { backgroundColor: cmd.buttonColor || '#007AFF' }]} 
+                style={[styles.gridButton, { backgroundColor: cmd.buttonColor || '#2563eb' }]} 
                 onPress={() => handleSendCommand(cmd.actionValue)}
+                activeOpacity={0.8}
               >
                 <Text style={styles.buttonText}>{cmd.label}</Text>
               </TouchableOpacity>
@@ -741,7 +862,7 @@ function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDeviceBLEModalProps)
    // Request runtime BLE permissions prior to executing scan/API calls
     const hasPermission = await requestBLEPermissions();
     if (!hasPermission) {
-      Alert.alert('Permission Denied', 'Bluetooth and Location permissions are required to pair edge devices.');
+      Alert.alert('Permission Denied', 'Bluetooth and Location permissions are required.');
       return;
     }
     
@@ -797,26 +918,26 @@ function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDeviceBLEModalProps)
 
                     if (sessionState.isFinished) return;
 
-                    const errorMsg = charError.message || '';
-                    const errorCode = charError.errorCode;
+                    // const errorMsg = charError.message || '';
+                    // const errorCode = charError.errorCode;
 
-                    if (
-                      errorCode === 2 ||
-                      errorCode === 201 ||
-                      errorMsg.toLowerCase().includes('cancel') ||
-                      errorMsg.toLowerCase().includes('disconnect')
-                    ) {
-                      // console.log('[BLE] Cleanly suppressed cancellation/teardown error:', errorMsg);
-                      return;
-                    }
+                    // if (
+                    //   errorCode === 2 ||
+                    //   errorCode === 201 ||
+                    //   errorMsg.toLowerCase().includes('cancel') ||
+                    //   errorMsg.toLowerCase().includes('disconnect')
+                    // ) {
+                    //   // console.log('[BLE] Cleanly suppressed cancellation/teardown error:', errorMsg);
+                    //   return;
+                    // }
 
-                    console.error('[BLE Subscription Error]:', charError);
+                    // console.error('[BLE Subscription Error]:', charError);
                     return;
                   }
 
                   if (characteristic?.value) {
                     const liveStatus = Buffer.from(characteristic.value, 'base64').toString('utf-8');
-                    console.log('[BLE Live Status]:', liveStatus);
+                    // console.log('[BLE Live Status]:', liveStatus);
                     setStatusText(`Device Status: ${liveStatus}`);
 
                     if (liveStatus === 'SUCCESS') {
@@ -827,7 +948,7 @@ function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDeviceBLEModalProps)
                         statusSubscription = null
                       }
                       setLoading(false);
-                      Alert.alert('Success', 'Edge device provisioned and connected successfully!');
+                      Alert.alert('Success', 'Edge device provisioned successfully!');
                       onSuccess();
                     } else if (liveStatus.startsWith('ERROR_')) {
                       sessionState.isFinished = true;
@@ -864,13 +985,13 @@ function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDeviceBLEModalProps)
               // setStatusText('Sending Token...');
               const negotiatedDevice = await connectedDevice.requestMTU(512);
               const chunkSize = negotiatedDevice.mtu;
-              const totalChunks = Math.ceil(jwtToken.length / chunkSize);
+              // const totalChunks = Math.ceil(jwtToken.length / chunkSize);
               for (let i = 0; i < jwtToken.length; i += chunkSize) {
                 const currentChunkNumber = Math.floor(i / chunkSize) + 1;
                 const chunk = jwtToken.slice(i, i + chunkSize);
                 const chunkBase64 = Buffer.from(chunk, 'utf-8').toString('base64');
 
-                console.log(`[BLE] Writing JWT chunk ${currentChunkNumber}/${totalChunks}...`);
+                // console.log(`[BLE] Writing JWT chunk ${currentChunkNumber}/${totalChunks}...`);
 
                 await connectedDevice.writeCharacteristicWithResponseForService(
                   SERVICE_UUID,
@@ -898,9 +1019,7 @@ function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDeviceBLEModalProps)
                     statusSubscription = null;
                   } 
                   setLoading(false);
-                  Alert.alert(
-                    'Timeout',
-                    'Hardware did not respond in time. Please check Wi-Fi credentials.');
+                  Alert.alert('Timeout', 'Hardware did not respond in time.');
                   }
                 }, 35000);
             } catch (innerErr: unknown) {
@@ -926,169 +1045,309 @@ function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDeviceBLEModalProps)
 
   return (
     <View style={styles.modalContainer}>
-      <Text style={styles.title}>Provision Edge Device</Text>
+      <View style={styles.modalContentWrapper}>
+        <Text style={styles.modalTitle}>Provision Edge Device</Text>
+        <Text style={styles.subtitle}>Setup secure Bluetooth link & Wi-Fi parameters</Text>
 
-      <TextInput
-        style={styles.input}
-        placeholder="Device Name (e.g., Living Room Thermostat)"
-        placeholderTextColor="#888"
-        value={deviceName}
-        onChangeText={setDeviceName}
-        editable={!loading}
-      />
-      <TextInput
-        style={styles.input}
-        placeholder="Wi-Fi SSID"
-        placeholderTextColor="#888"
-        value={wifiSsid}
-        onChangeText={setWifiSsid}
-        autoCapitalize="none"
-        editable={!loading}
-      />
-      <TextInput
-        style={styles.input}
-        placeholder="Wi-Fi Password"
-        placeholderTextColor="#888"
-        value={wifiPassword}
-        onChangeText={setWifiPassword}
-        secureTextEntry
-        editable={!loading}
-      />
+        <TextInput
+          style={styles.input}
+          placeholder="Device Name (e.g., Gateway Node 01)"
+          placeholderTextColor="#64748b"
+          value={deviceName}
+          onChangeText={setDeviceName}
+          editable={!loading}
+        />
+        <TextInput
+          style={styles.input}
+          placeholder="Wi-Fi SSID"
+          placeholderTextColor="#64748b"
+          value={wifiSsid}
+          onChangeText={setWifiSsid}
+          autoCapitalize="none"
+          editable={!loading}
+        />
+        <TextInput
+          style={styles.input}
+          placeholder="Wi-Fi Password"
+          placeholderTextColor="#64748b"
+          value={wifiPassword}
+          onChangeText={setWifiPassword}
+          secureTextEntry
+          editable={!loading}
+        />
 
-      {loading && <Text style={styles.statusText}>{statusText}</Text>}
+          {loading && <Text style={styles.statusText}>{statusText}</Text>}
 
-      <TouchableOpacity
-        style={[styles.button, loading && styles.disabledButton]}
-        onPress={handleStartOnboarding}
-        disabled={loading}
-      >
-        {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Pair & Transmit over BLE</Text>}
-      </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.button, loading && styles.disabledButton]}
+          onPress={handleStartOnboarding}
+          disabled={loading}
+          activeOpacity={0.8}
+        >
+          {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Pair & Transmit over BLE</Text>}
+        </TouchableOpacity>
 
-      <TouchableOpacity style={styles.cancelButton} onPress={onClose} disabled={loading}>
-        <Text style={styles.cancelButtonText}>Cancel</Text>
-      </TouchableOpacity>
+        <TouchableOpacity style={styles.cancelButton} onPress={onClose} disabled={loading}>
+          <Text style={styles.cancelButtonText}>Cancel</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
-
 // ----------------------------------------------------------------------------
-// STYLES
+// STYLES (Dark, Sleek, Modern Theme)
 // ----------------------------------------------------------------------------
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: 'center', padding: 20, backgroundColor: '#f5f5f5' },
-  dashboardContainer: { flex: 1, padding: 20, paddingTop: 60, backgroundColor: '#f5f5f5' },
-  modalContainer: { flex: 1, justifyContent: 'center', padding: 20, backgroundColor: '#fff' },
-  title: { fontSize: 22, fontWeight: 'bold', textAlign: 'center', marginBottom: 20 },
-  form: { backgroundColor: '#fff', padding: 20, borderRadius: 10, elevation: 2 },
-  input: { 
-    color: '#000000', 
-    borderWidth: 1, 
-    borderColor: '#ccc', 
-    borderRadius: 6, 
-    padding: 12, 
-    marginBottom: 15, 
-    fontSize: 16, 
-    backgroundColor: '#fff',
-    fontFamily: Platform.OS === 'android' ? 'normal': undefined
+  container: { 
+    flex: 1, 
+    justifyContent: 'center', 
+    padding: 24, 
+    backgroundColor: '#0b0f19' 
   },
-  button: { backgroundColor: '#007AFF', padding: 15, borderRadius: 6, alignItems: 'center' },
-  disabledButton: { backgroundColor: '#a0c4ff' },
-  buttonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
-  toggleButton: { marginTop: 15, alignItems: 'center' },
-  toggleButtonText: { color: '#007AFF', fontSize: 14, fontWeight: '600' },
-  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-  welcomeText: { fontSize: 20, fontWeight: 'bold' },
-  logoutText: { color: '#d9534f', fontWeight: 'bold' },
+  authCardWrapper: {
+    backgroundColor: '#121826',
+    borderRadius: 16,
+    padding: 24,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.5,
+    shadowRadius: 15,
+    elevation: 10,
+  },
+  dashboardContainer: { 
+    flex: 1, 
+    padding: 20, 
+    paddingTop: 60, 
+    backgroundColor: '#0b0f19' 
+  },
+  modalContainer: { 
+    flex: 1, 
+    justifyContent: 'center', 
+    padding: 24, 
+    backgroundColor: '#0b0f19' 
+  },
+  modalContentWrapper: {
+    backgroundColor: '#121826',
+    borderRadius: 16,
+    padding: 24,
+    borderWidth: 1,
+    borderColor: '#1e293b',
+  },
+  brandTitle: {
+    fontSize: 12,
+    letterSpacing: 3,
+    color: '#3b82f6',
+    fontWeight: 'bold',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  title: { 
+    fontSize: 24, 
+    fontWeight: 'bold', 
+    color: '#f8fafc',
+    marginBottom: 6,
+    textAlign: 'center' 
+  },
+  modalTitle: { 
+    fontSize: 22, 
+    fontWeight: 'bold', 
+    color: '#f8fafc',
+    marginBottom: 6,
+    textAlign: 'center' 
+  },
+  subtitle: {
+    fontSize: 14,
+    color: '#94a3b8',
+    textAlign: 'center',
+    marginBottom: 24,
+  },
+  form: { 
+    width: '100%' 
+  },
+  input: { 
+    color: '#f8fafc', 
+    borderWidth: 1, 
+    borderColor: '#1e293b', 
+    borderRadius: 10, 
+    padding: 14, 
+    marginBottom: 16, 
+    fontSize: 15, 
+    backgroundColor: '#1a2234',
+    fontFamily: Platform.OS === 'android' ? 'normal' : undefined
+  },
+  button: { 
+    backgroundColor: '#3b82f6', 
+    padding: 15, 
+    borderRadius: 10, 
+    alignItems: 'center',
+    shadowColor: '#3b82f6',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  disabledButton: { 
+    backgroundColor: '#1e3a8a' 
+  },
+  buttonText: { 
+    color: '#ffffff', 
+    fontSize: 16, 
+    fontWeight: '600' 
+  },
+  toggleButton: { 
+    marginTop: 20, 
+    alignItems: 'center' 
+  },
+  toggleButtonText: { 
+    color: '#60a5fa', 
+    fontSize: 14, 
+    fontWeight: '500' 
+  },
+  headerRow: { 
+    flexDirection: 'row', 
+    justifyContent: 'space-between', 
+    alignItems: 'center', 
+    marginBottom: 16 
+  },
+  greetingLabel: {
+    fontSize: 10,
+    color: '#64748b',
+    letterSpacing: 1,
+    fontWeight: '700',
+  },
+  welcomeText: { 
+    fontSize: 20, 
+    fontWeight: 'bold',
+    color: '#f8fafc' 
+  },
   statusBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#eef4ff',
-    padding: 10,
-    borderRadius: 6,
-    marginBottom: 15,
+    backgroundColor: '#121826',
+    borderWidth: 1,
+    borderColor: '#1e293b',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    marginBottom: 16,
   },
-  statusLabel: { fontSize: 14, fontWeight: '600', color: '#333' },
-  statusConnected: { fontSize: 14, color: 'green', fontWeight: 'bold' },
-  statusConnecting: { fontSize: 14, color: '#007AFF' },
-  statusRow: { flexDirection: 'row', alignItems: 'center' },
-  mqttErrorText: { color: 'red', fontSize: 12, marginBottom: 10 },
-  addButton: { backgroundColor: '#34c759', padding: 15, borderRadius: 6, alignItems: 'center', marginBottom: 20 },
-  addButtonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
-  sectionTitle: { fontSize: 18, fontWeight: 'bold', marginBottom: 10 },
-  deviceCard: { backgroundColor: '#fff', padding: 15, borderRadius: 8, marginBottom: 10, borderWidth: 1, borderColor: '#e0e0e0' },
-  deviceName: { fontSize: 16, fontWeight: 'bold' },
-  deviceTopic: { fontSize: 14, color: '#666', marginTop: 4 },
-  emptyText: { textAlign: 'center', color: '#888', marginTop: 20 },
-  statusText: { color: '#007AFF', textAlign: 'center', marginVertical: 10, fontStyle: 'italic' },
-  cancelButton: { marginTop: 15, alignItems: 'center' },
-  cancelButtonText: { color: '#888', fontSize: 16 },
+  statusLabel: { 
+    fontSize: 13, 
+    fontWeight: '600', 
+    color: '#94a3b8',
+    marginLeft: 8,
+  },
+  statusConnected: { 
+    fontSize: 13, 
+    color: '#34d399', 
+    fontWeight: 'bold' 
+  },
+  addButton: { 
+    backgroundColor: '#059669', 
+    padding: 15, 
+    borderRadius: 10, 
+    alignItems: 'center', 
+    marginBottom: 20,
+    shadowColor: '#059669',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  addButtonText: { 
+    color: '#ffffff', 
+    fontSize: 15, 
+    fontWeight: 'bold' 
+  },
+  sectionTitle: { 
+    fontSize: 16, 
+    fontWeight: 'bold', 
+    color: '#cbd5e1',
+    marginBottom: 12,
+    letterSpacing: 0.5,
+  },
+  deviceCard: { 
+    backgroundColor: '#121826', 
+    padding: 16, 
+    borderRadius: 12, 
+    marginBottom: 12, 
+    borderWidth: 1, 
+    borderColor: '#1e293b' 
+  },
   selectedDeviceCard: {
-    borderColor: '#007AFF',
-    backgroundColor: '#f0f7ff',
-    borderWidth: 2,
+    borderColor: '#3b82f6',
+    backgroundColor: '#162238',
+    borderWidth: 1.5,
   },
-  deviceSubText: {
-    fontSize: 12,
-    color: '#666',
-    marginTop: 4,
+  deviceName: { 
+    fontSize: 16, 
+    fontWeight: 'bold',
+    color: '#f8fafc' 
+  },
+  emptyText: { 
+    textAlign: 'center', 
+    color: '#64748b', 
+    marginTop: 20,
+    fontStyle: 'italic'
+  },
+  statusText: { 
+    color: '#60a5fa', 
+    textAlign: 'center', 
+    marginVertical: 12, 
+    fontStyle: 'italic',
+    fontSize: 13,
+  },
+  cancelButton: { 
+    marginTop: 16, 
+    alignItems: 'center' 
+  },
+  cancelButtonText: { 
+    color: '#94a3b8', 
+    fontSize: 15,
+    fontWeight: '500' 
   },
   selectedPanel: {
     marginTop: 15,
-    padding: 15,
-    backgroundColor: '#fff',
-    borderRadius: 8,
+    padding: 16,
+    backgroundColor: '#121826',
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#ccc',
+    borderColor: '#1e293b',
   },
   panelHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 12,
   },
   panelTitle: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: 'bold',
-    color: '#333',
+    color: '#f8fafc',
   },
   closePanelText: {
-    color: '#007AFF',
+    color: '#60a5fa',
     fontWeight: 'bold',
+    fontSize: 13,
   },
   panelSubHeader: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
-    color: '#444',
-    marginBottom: 5,
-  },
-  telemetryBox: {
-    backgroundColor: '#1e1e1e',
-    padding: 10,
-    borderRadius: 6,
-    marginBottom: 10,
-  },
-  telemetryText: {
-    color: '#00ff00',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
-    fontSize: 12,
-  },
-  commandButton: {
-    backgroundColor: '#007AFF',
-    padding: 12,
-    borderRadius: 6,
-    alignItems: 'center',
+    color: '#94a3b8',
+    marginBottom: 8,
+    marginTop: 4,
   },
   commandGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'space-between',
-    gap: 10,
   },
   gridButton: {
     width: '48%',
     padding: 12,
-    borderRadius: 6,
+    borderRadius: 8,
     alignItems: 'center',
     marginBottom: 10,
   },
@@ -1101,7 +1360,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginTop: 4,
+    marginTop: 6,
   },
   deleteButton: {
     padding: 8,
@@ -1111,7 +1370,7 @@ const styles = StyleSheet.create({
   headerActionsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8, // Space between the two buttons
+    gap: 8,
   },
   actionButton: {
     paddingVertical: 6,
@@ -1122,34 +1381,34 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   deleteButtonOutline: {
-    borderColor: '#FF3B30',
-    backgroundColor: '#FFF2F2', // Soft red tint background
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
   },
   deleteButtonText: {
-    color: '#FF3B30',
+    color: '#f87171',
     fontWeight: '600',
-    fontSize: 12,
+    fontSize: 11,
   },
   logoutButtonOutline: {
-    borderColor: '#007AFF',
-    backgroundColor: '#F0F6FF', // Soft blue tint background
+    borderColor: 'rgba(59, 130, 246, 0.3)',
+    backgroundColor: 'rgba(59, 130, 246, 0.1)',
   },
   logoutButtonText: {
-    color: '#007AFF',
+    color: '#60a5fa',
     fontWeight: '600',
-    fontSize: 12,
+    fontSize: 11,
   },
   dot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
   onlineStatusText: {
     fontSize: 12,
     fontWeight: '600',
   },
   telemetryContainer: {
-    marginBottom: 15,
+    marginBottom: 12,
   },
   telemetryGrid: {
     flexDirection: 'row',
@@ -1157,29 +1416,30 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   telemetryCard: {
-    backgroundColor: '#f8f9fa',
+    backgroundColor: '#1a2234',
     borderWidth: 1,
-    borderColor: '#e9ecef',
-    borderRadius: 6,
+    borderColor: '#1e293b',
+    borderRadius: 8,
     padding: 10,
     width: '48%',
     alignItems: 'center',
   },
   telemetryKey: {
     fontSize: 10,
-    color: '#6c757d',
+    color: '#64748b',
     marginBottom: 4,
     fontWeight: '600',
   },
   telemetryValue: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: 'bold',
-    color: '#343a40',
+    color: '#38bdf8',
   },
   telemetryPlaceholder: {
-    color: '#6c757d',
+    color: '#64748b',
     fontStyle: 'italic',
     textAlign: 'center',
-    padding: 10,
+    padding: 8,
+    fontSize: 13,
   }
 });
