@@ -4,7 +4,7 @@ dotenv.config();
 import express, { Request, Response, Application, NextFunction } from 'express';
 import bcrypt from 'bcrypt';
 import jwt, { Secret, SignOptions, JwtPayload } from 'jsonwebtoken';
-import { Pool, PoolClient, DatabaseError } from 'pg';
+import { Pool, PoolClient, DatabaseError, ClientBase } from 'pg';
 import mqtt from 'mqtt';
 import crypto from 'crypto';
 
@@ -16,6 +16,7 @@ import * as jsrsasign from 'jsrsasign';
 
 import { S3Client, GetObjectCommand, ListObjectsV2Command, S3 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { env } from 'process';
 
 const publicApp: Application = express();
 publicApp.set('trust proxy', 'loopback'); // Trust the loopback interface for proxy headers
@@ -1139,45 +1140,70 @@ const spacesClient = new S3Client({
   },
 });
 
+interface PlaylistItem {
+  id: string;
+  filename: string;
+  url: string;
+  size_bytes: number;
+}
+
 export const createPlaylistJsonHandler = (pool: Pool) => {
-  return async (req: Request, res: Response): Promise<void> => {
+  return async (req: Request, res: Response) => {
     const client = await pool.connect();
 
     try {
-      // // 1. Fetch your dynamic playlist sequence from PostgreSQL
-      // const result = await client.query(
-      //   'SELECT id, s3_key, file_name FROM playlist_videos ORDER BY position ASC;'
-      // );
 
-      // if (result.rows.length === 0) {
-      //   res.status(404).json({ error: 'No videos found in the active playlist.' });
-      //   return;
-      // }
+      // 1. List all video objects currently stored in the bucket
+      const listCommand = new ListObjectsV2Command({ Bucket: process.env.DIGITAL_OCEAN_SPACES_BUCKET_NAME });
+      const response = await spacesClient.send(listCommand);
 
-      // const listCommand = new ListObjectsV2Command( {Bucket: process.env.DIGITAL_OCEAN_SPACES_BUCKET_NAME });
-      // const response = await spacesClient.send(listCommand);
+      if (!response.Contents) {
+        return res.status(200).json({ playlist: [] });
+      }
 
-      const videos: string[] = ["video_1.mp4", "video_2.mp4"];
+      const validObjects = response.Contents.filter((obj) => typeof obj.Key === "string");
 
-      // 2. Generate a secure, time-bound presigned URL for each video in parallel
-      const playlistPromises = videos.map(async (video) => {
-        const s3Command = new GetObjectCommand({
-          Bucket: process.env.DIGITAL_OCEAN_SPACES_BUCKET_NAME,
-          Key: video, // e.g. "video_1.mp4" (root directory)
+      // const videos: string[] = ["video_1.mp4", "video_2.mp4"];
+
+      // // 2. Generate a secure, time-bound presigned URL for each video in parallel
+      // const playlistPromises = videos.map(async (video) => {
+      //   const s3Command = new GetObjectCommand({
+      //     Bucket: process.env.DIGITAL_OCEAN_SPACES_BUCKET_NAME,
+      //     Key: video, // e.g. "video_1.mp4" (root directory)
+      //   });
+
+      //   const object = await spacesClient.send(s3Command);
+
+      //   // URL expires in 2 hours (7200 seconds)
+      //   const presignedUrl = await getSignedUrl(spacesClient, s3Command, { expiresIn: 7200 });
+
+      //   return {
+      //     title: video,
+      //     url: presignedUrl,
+      //   };
+      // });
+
+      const playlist: PlaylistItem[] = [];
+
+      // 2. Map over files to get exact sizes and generate secure signed URLs
+      for (const object of response.Contents) {
+        const key = object.Key;
+        if (!key) continue;
+
+        const sizeBytes = object.Size ?? 0;
+        // const sizeMb = Math.ceil(sizeBytes / (1024 * 1024));
+
+        const getObjectCommand = new GetObjectCommand({ Bucket: process.env.DIGITAL_OCEAN_SPACES_BUCKET_NAME, Key: key });
+        const signedUrl = await getSignedUrl(spacesClient, getObjectCommand, { expiresIn: 21600 });
+
+        playlist.push({
+          id: key.replace(/\.[^/.]+$/, ""),
+          filename: key,
+          url: signedUrl,
+          size_bytes: sizeBytes,
         });
-
-        const object = await spacesClient.send(s3Command);
-
-        // URL expires in 2 hours (7200 seconds)
-        const presignedUrl = await getSignedUrl(spacesClient, s3Command, { expiresIn: 7200 });
-
-        return {
-          title: video,
-          url: presignedUrl,
-        };
-      });
-
-      const playlist = await Promise.all(playlistPromises);
+      }
+      // const playlist = await Promise.all(playlistPromises);
 
       // 3. Return the array as clean JSON to the Raspberry Pi
       res.status(200).json(playlist);
