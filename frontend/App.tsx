@@ -1,13 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Text,
   View,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  Alert,
   ActivityIndicator,
-  Platform,
 } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -18,8 +12,8 @@ import AuthScreen from './screens/AuthScreen';
 import DevicesScreen from './screens/DevicesScreen';
 import VideosScreen from './screens/VideosScreen';
 import { AuthState } from './types/auth.types';
+import { setOnUnauthorizedCallback } from './api/interceptor';
 import { DeviceDashboardProps } from './screens/DevicesScreen';
-import { ENV } from './config/env';
 
 const AUTH_STATE_KEY = '@app_auth_state';
 
@@ -27,15 +21,18 @@ export const authStorage = {
   // Save full session upon successful login/signup
   async saveSession(authData: AuthState): Promise<void> {
     try {
-      // 1. Isolate high-security credentials for SecureStore
-      if (authData.token) {
-        await SecureStore.setItemAsync('jwt_token', authData.token);
+      // Isolate high-security credentials for SecureStore
+      if (authData.access_token) {
+        await SecureStore.setItemAsync('accessToken', authData.access_token);
+      }
+      if (authData.refresh_token) {
+        await SecureStore.setItemAsync('refreshToken', authData.refresh_token);
       }
       if (authData.mqtt?.password) {
         await SecureStore.setItemAsync('mqtt_password', authData.mqtt.password);
       }
 
-      // 2. Store non-sensitive metadata (user info, broker URL, topics) in AsyncStorage
+      // Store non-sensitive metadata (user info, broker URL, topics) in AsyncStorage
       const publicData = {
         user: authData.user,
         mqtt: authData.mqtt ? {
@@ -45,8 +42,6 @@ export const authStorage = {
           // password omitted here intentionally
         } : undefined,
       };
-
-      console.log(publicData);
 
       await AsyncStorage.setItem(AUTH_STATE_KEY, JSON.stringify(publicData));
     } catch (error) {
@@ -58,23 +53,22 @@ export const authStorage = {
   async getSession(): Promise<AuthState | null> {
     try {
       const storedPublicData = await AsyncStorage.getItem(AUTH_STATE_KEY);
-      console.log(`STORED PUBLIC DATA ${storedPublicData}`);
       if (!storedPublicData) return null;
 
       const parsed = JSON.parse(storedPublicData);
 
       // Fetch sensitive elements from hardware-backed secure storage
-      const token = (await SecureStore.getItemAsync('jwt_token')) || undefined;
+      const accessToken = (await SecureStore.getItemAsync('accessToken')) || undefined;
+      const refreshToken = (await SecureStore.getItemAsync('refreshToken')) || undefined;
       const mqttPassword = (await SecureStore.getItemAsync('mqtt_password')) || '';
 
-      console.log(`TOKEN ${token}}`);
-      console.log(`MQTT Password ${mqttPassword}`);
-
-      if (!token) return null; // If token is missing/expired from keychain, force re-login
+      if (!accessToken) return null; // If token is missing/expired from keychain, force re-login
+      if (!refreshToken) return null; // If token is missing/expired from keychain, force re-login
 
       return {
         user: parsed.user,
-        token: token,
+        access_token: accessToken,
+        refresh_token: refreshToken,
         mqtt: parsed.mqtt ? {
           ...parsed.mqtt,
           password: mqttPassword,
@@ -89,7 +83,8 @@ export const authStorage = {
   // Clear everything on logout or account deletion
   async clearSession(): Promise<void> {
     try {
-      await SecureStore.deleteItemAsync('jwt_token');
+      await SecureStore.deleteItemAsync('accessToken');
+      await SecureStore.deleteItemAsync('refreshToken');
       await SecureStore.deleteItemAsync('mqtt_password');
       await AsyncStorage.removeItem(AUTH_STATE_KEY);
     } catch (error) {
@@ -98,29 +93,28 @@ export const authStorage = {
   }
 };
 
-// const BACKEND_IP = process.env.EXPO_PUBLIC_BACKEND_IP ?? 'localhost';
-// const BACKEND_PORT = process.env.EXPO_PUBLIC_BACKEND_PORT ?? '3000';
-const BACKEND_URL = `http://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}`;
-
-// const SERVICE_UUID = process.env.EXPO_PUBLIC_SERVICE_UUID ?? '';
-// const SSID_CHARACTERISTIC_UUID = process.env.EXPO_PUBLIC_SSID_CHARACTERISTIC_UUID ?? '';
-// const PASS_CHARACTERISTIC_UUID = process.env.EXPO_PUBLIC_PASS_CHARACTERISTIC_UUID ?? '';
-// const JWT_CHARACTERISTIC_UUID = process.env.EXPO_PUBLIC_JWT_CHARACTERISTIC_UUID ?? '';
-// const STATUS_CHARACTERISTIC_UUID = process.env.EXPO_PUBLIC_STATUS_CHARACTERISTIC_UUID ?? '';
-
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!\%*?&]{8,}$/;
-
 export default function App(): React.ReactElement {
   const [authState, setAuthState] = useState<AuthState | null>(null);
   const [isInitializing, setIsInitializing] = useState<boolean>(true);
+
+  const handleLogout = async () => {
+    await authStorage.clearSession();
+    setAuthState(null);
+  };
+
+  // Register the global interceptor logout trigger when the app mounts
+  useEffect(() => {
+    setOnUnauthorizedCallback(() => {
+      console.log('[Auth] Refresh token expired. Forcing global logout.');
+      setAuthState(null); // Instantly drops user back to AuthScreen
+    });
+  }, []);
 
   // Check storage on cold app start
   useEffect(() => {
     async function restoreSession() {
       try {
         const savedSession = await authStorage.getSession();
-        console.log(savedSession);
         if (savedSession) {
           setAuthState(savedSession);
         }
@@ -156,10 +150,7 @@ export default function App(): React.ReactElement {
     <NavigationContainer>
       <MainDashboardNavigator 
         authState={authState} 
-        onLogout={async () => {
-          await authStorage.clearSession(); // Wipe secure data on logout
-          setAuthState(null);
-        }} 
+        onLogout={handleLogout}
       />
     </NavigationContainer>
   );

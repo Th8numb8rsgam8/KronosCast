@@ -21,6 +21,7 @@ export interface SessionState {
 
 export interface AuthState {
   user: User;
-  token?: string;
+  access_token?: string;
+  refresh_token?: string;
   mqtt?: MqttCredentials;
 }

@@ -1,13 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, FlatList, ActivityIndicator, Alert, StyleSheet } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import { AuthState } from '../types/auth.types';
 import { ENV } from '../config/env';
+import { apiClient } from '../api/interceptor';
 
 export interface VideoItem {
   id: string;
   filename: string;
-  size_mb: number;
+  size: number;
 }
 
 export default function VideosScreen({ authState }: { authState: AuthState }) {
@@ -22,11 +23,14 @@ export default function VideosScreen({ authState }: { authState: AuthState }) {
 
   const fetchVideos = async () => {
     try {
-      const response = await fetch(`${BACKEND_URL}/api/videos`, {
-        headers: { 'Authorization': `Bearer ${authState.token}` },
-      });
-      const data = await response.json();
-      if (response.ok) setVideos(data.playlist || []);
+      // const response = await fetch(`${BACKEND_URL}/api/videos`, {
+      //   headers: { 'Authorization': `Bearer ${authState.token}` },
+      // });
+      // const data = await response.json();
+      // if (response.ok) setVideos(data.videos || []);
+
+      const response = await apiClient.get(`/api/videos`);
+      setVideos(response.data.videos || []);
     } catch (err) {
       console.error('Failed to load videos:', err);
     } finally {
@@ -53,19 +57,15 @@ export default function VideosScreen({ authState }: { authState: AuthState }) {
         type: 'video/mp4',
       } as any);
 
-      const response = await fetch(`${BACKEND_URL}/api/videos/upload`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${authState.token}` },
-        body: formData,
-      });
+      // const response = await fetch(`${BACKEND_URL}/api/videos/upload`, {
+      //   method: 'POST',
+      //   headers: { 'Authorization': `Bearer ${authState.token}` },
+      //   body: formData,
+      // });
 
-      if (response.ok) {
-        Alert.alert('Success', 'Video uploaded to bucket successfully!');
-        fetchVideos();
-      } else {
-        const data = await response.json();
-        Alert.alert('Upload Failed', data.error || 'Could not upload video.');
-      }
+      const response = await apiClient.post(`/api/videos/upload`, formData);
+      Alert.alert('Success', 'Video uploaded to bucket successfully!');
+      fetchVideos();
     } catch (err) {
       Alert.alert('Error', 'Network error during video upload.');
     } finally {
@@ -94,10 +94,10 @@ export default function VideosScreen({ authState }: { authState: AuthState }) {
           renderItem={({ item }) => (
             <View style={styles.card}>
               <Text style={styles.cardTitle}>{item.filename}</Text>
-              <Text style={styles.cardSubtitle}>{item.size_mb} MB</Text>
+              <Text style={styles.cardSubtitle}>{item.size} MB</Text>
             </View>
           )}
-          ListEmptyComponent={<Text style={styles.emptyText}>No videos found in bucket.</Text>}
+          ListEmptyComponent={<Text style={styles.emptyText}>No videos found in your bucket.</Text>}
           contentContainerStyle={{ paddingBottom: 40 }}
         />
       )}

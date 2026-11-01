@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { BleManager, Device, Subscription, BleError } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
+import { apiClient } from '../api/interceptor';
 import { SessionState } from '../types/auth.types';
 import { ENV } from '../config/env';
 
@@ -81,14 +82,17 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
     try {
       // Step 1: Request signed JWT setup token from Express
       setStatusText('Generating JWT setup token...');
-      const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/devices/request-setup`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id, deviceName }),
-      });
+      // const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/auth/devices/request-setup`, {
+      //   method: 'POST',
+      //   headers: { 'Content-Type': 'application/json' },
+      //   body: JSON.stringify({ userId: user.id, deviceName }),
+      // });
 
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Failed to request setup');
+      const response = await apiClient.post('/api/auth/devices/request-setup', { deviceName });
+      const data = response.data;
+
+      // const data = await response.json();
+      // if (!response.ok) throw new Error(data.error || 'Failed to request setup');
 
       const jwtToken = data.setupToken; // Signed JWT token
 

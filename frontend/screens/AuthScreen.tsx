@@ -81,7 +81,8 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.Re
         // Pass full AuthState (user, token, mqtt credentials) to parent
         onAuthSuccess({
           user: data.user,
-          token: data.token,
+          access_token: data.access_token,
+          refresh_token: data.refresh_token,
           mqtt: data.mqtt,
         });
       } else {

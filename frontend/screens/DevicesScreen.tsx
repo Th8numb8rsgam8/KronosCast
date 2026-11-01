@@ -15,6 +15,7 @@ import AddDeviceBLEModal from './AddDeviceBLEModal';
 import { AuthState, MqttCredentials } from '../types/auth.types';
 import { DeviceItem, DeviceCommand } from '../types/device.types';
 import { ENV } from '../config/env';
+import { apiClient } from '../api/interceptor';
 
 const AVAILABLE_COMMANDS: DeviceCommand[] = [
   { label: 'StreamSwitch On', actionValue: 'STREAMSWITCH_ON', buttonColor: '#007AFF' },
@@ -34,19 +35,14 @@ function useMQTT(mqttInfo?: MqttCredentials) {
     }
 
     let isMounted = true;
+    let client: MqttClient | null = null;
 
     async function initMqttClient(config: MqttCredentials) {
       try {
         setError(null);
 
-        // Parse host and port (e.g. "wss://192.168.1.50:9001" or "192.168.1.50:9001")
-        // const rawUrl = config.brokerUrl.replace(/^ws?:\/\//, '').replace(/^mqtts?:\/\//, '');
-        // const [host, portStr] = rawUrl.split(':');
-        // const port = portStr ? parseInt(portStr, 10) : 9001; // Default WS port
-
         const options: IClientOptions = {
-          // path: '/mqtt',
-           path: '/', // Mosquitto WebSocket path
+          path: '/',
           username: config.username,
           password: config.password,
           clientId: `app_${config.username}_${Math.random().toString(16).substring(2, 8)}`,
@@ -56,12 +52,9 @@ function useMQTT(mqttInfo?: MqttCredentials) {
           connectTimeout: 10000,
         };
 
-        // const brokerUrl = `ws://${host}:${port}/`;
-
-        // const brokerUrl = "wss://situation-rephrase-cusp.ngrok-free.dev";
         console.log(`[MQTT] Connecting to ${config.brokerUrl}...`);
 
-        const client = mqtt.connect(config.brokerUrl, options);
+        client = mqtt.connect(config.brokerUrl, options);
         clientRef.current = client;
 
         client.on('connect', () => {
@@ -73,8 +66,8 @@ function useMQTT(mqttInfo?: MqttCredentials) {
         });
 
         client.on('error', (err) => {
-          console.error('[MQTT] Socket error:', err);
           if (isMounted) {
+            console.error('[MQTT] Socket error:', err);
             setError(err.message || 'MQTT Connection Error');
           }
         });
@@ -98,23 +91,25 @@ function useMQTT(mqttInfo?: MqttCredentials) {
     return () => {
       isMounted = false;
       if (clientRef.current) {
-        console.log('[MQTT] Disconnecting client...');
-        clientRef.current.end(true);
+        console.log('[MQTT] Gracefully disconnecting client...');
+        try {
+          clientRef.current.removeAllListeners();
+          if (clientRef.current.connected) {
+              clientRef.current.end(false, {}, () => {
+                console.log('[MQTT] Disconnected cleanly.');
+              });
+          } else {
+            clientRef.current.end(true);
+          }
+        } catch (e) {
+          // Suppress abrupt socket termination errors during logout teardown
+        }
         clientRef.current = null;
       }
     };
   }, [mqttInfo?.brokerUrl, mqttInfo?.username, mqttInfo?.password]);
 
-  const publish = (topic: string, message: object | string) => {
-    if (clientRef.current && isConnected) {
-      const payload = typeof message === 'string' ? message : JSON.stringify(message);
-      clientRef.current.publish(topic, payload, { qos: 1 });
-    } else {
-      console.warn('[MQTT] Cannot publish: Client is disconnected');
-    }
-  };
-
-  return { client: clientRef.current, isConnected, error, publish };
+  return { client: clientRef.current, isConnected, error };
 }
 
 export interface DeviceDashboardProps {
@@ -178,14 +173,8 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
     const topicsToSubscribe = [
       mqttInfo.topics.telemetrySubscribe,
       mqttInfo.topics.statusSubscribe,
-    ].filter(Boolean);
+    ].filter(Boolean) as string[];
 
-    topicsToSubscribe.forEach((topic) => {
-      client.subscribe(topic, { qos: 1 }, (err) => {
-        if (err) console.error(`[MQTT] Subscription error for ${topic}:`, err);
-        else console.log(`[MQTT] Subscribed to ${topic}`);
-      });
-    });
 
     const handleMessage = (topic: string, payload: Buffer) => {
       try {
@@ -213,24 +202,39 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
         console.warn(`[MQTT Parse Error] Topic ${topic}:`, e);
       }
     };
+    
+    if (topicsToSubscribe.length > 0) {
+      topicsToSubscribe.forEach((topic) => {
+        client.subscribe(topic, { qos: 1 }, (err) => {
+          if (err)  {
+            console.error(`[MQTT] Subscription error for ${topic}:`, err);
+          } else { 
+            console.log(`[MQTT] Subscribed to ${topic}`);
+          }
+        });
+      });
+    }
 
     client.on('message', handleMessage);
 
+    // Only clean up the message listener
     return () => {
-      client.off('message', handleMessage);
-      topicsToSubscribe.forEach((topic) => {
-        if (client.connected) client.unsubscribe(topic);
-      });
+      try {
+        client.off('message', handleMessage);
+      } catch (err) {
+        // Suppress any cleanup race condition throws
+      }
     };
   }, [client, isConnected, mqttInfo]);
 
   const fetchDevices = async (): Promise<void> => {
     try {
-      const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/devices/${user.id}`);
-      const data = await response.json();
-      if (response.ok) {
-        setDevices(data.devices || []);
-      }
+      // const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/devices/${user.id}`);
+      const response = await apiClient.get(`/api/devices/${user.id}`);
+      // const data = await response.json();
+      // if (response.ok) {
+      setDevices(response.data.devices || []);
+      // }
     } catch (err) {
       Alert.alert('Error', 'Failed to load user devices.');
     } finally {
@@ -269,25 +273,28 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
           style: 'destructive',
           onPress: async () => {
             try {
-              const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/devices/${user.id}/${deviceId}`, {
-                method: 'DELETE',
-              });
+              //const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/devices/${user.id}/${deviceId}`, {
+              //  method: 'DELETE',
+              //});
+
+              const response = await apiClient.delete(`/api/devices/${user.id}/${deviceId}`);
               
-              if (response.ok) {
-                // Remove the device from local state immediately
-                setDevices((prevDevices) => prevDevices.filter((d) => d.id !== deviceId));
+              // if (response.ok) {
+              // Remove the device from local state immediately
+              setDevices((prevDevices) => prevDevices.filter((d) => d.id !== deviceId));
                 
-                // If the currently selected device is the one being deleted, close the panel
-                if (selectedDevice?.id === deviceId) {
-                  setSelectedDevice(null);
-                }
-                
-                Alert.alert('Success', 'Device removed successfully.');
-              } else {
-                Alert.alert('Error', 'Failed to delete the device on the server.');
+              // If the currently selected device is the one being deleted, close the panel
+              if (selectedDevice?.id === deviceId) {
+                setSelectedDevice(null);
               }
+                
+              Alert.alert('Success', 'Device removed successfully.');
+              // } else {
+              //   Alert.alert('Error', 'Failed to delete the device on the server.');
+              // }
             } catch (err) {
-              Alert.alert('Error', 'Network error while deleting device.');
+              Alert.alert('Error', `${err}`);
+              // Alert.alert('Error', 'Network error while deleting device.');
             }
           },
         },
@@ -307,22 +314,31 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
           onPress: async () => {
             try {
               // Assuming authState contains the JWT token and user ID
-              const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/users/${user.id}`, {
-                method: 'DELETE',
-                headers: {
-                  'Authorization': `Bearer ${authState.token}`, // Pass your token for security
-                },
-              });
+              // const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/users/${user.id}`, {
+              //   method: 'DELETE',
+              //   headers: {
+              //     'Authorization': `Bearer ${authState.token}`, // Pass your token for security
+              //   },
+              // });
 
-              if (response.ok) {
+              const response = await apiClient.delete(`/api/auth/users/${user.id}`);
+
+              // if (response.ok) {
                 // Alert.alert('Account Deleted', 'Your account has been successfully removed.');
-                onLogout(); // Clears authState and returns to login screen
-              } else {
-                Alert.alert('Error', 'Failed to delete account on the server.');
-              }
-            } catch (err) {
+              onLogout(); // Clears authState and returns to login screen
+              // } else {
+              //   Alert.alert('Error', 'Failed to delete account on the server.');
+              // }
+            } catch (err: any) {
               // console.error('Account deletion error:', err);
-              Alert.alert('Error', 'Network error while attempting to delete account.');
+              const serverMessage = 
+                err.response?.data?.message ||
+                err.response?.data?.error ||
+                err.message ||
+                'An unkown error occured.';
+
+              Alert.alert('Error', serverMessage);
+              // Alert.alert('Error', 'Network error while attempting to delete account.');
             }
           },
         },
@@ -390,9 +406,9 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
       <View style={styles.headerRow}>
         <View>
           <Text style={styles.greetingLabel}>CONNECTED USER</Text>
-          <Text style={styles.welcomeText}>{user.username}</Text>
+          <Text style={styles.userName}>{user.username}</Text>
         </View>
-  
+
         <View style={styles.headerActionsRow}>
           <TouchableOpacity onPress={handleDeleteAccount} style={[styles.actionButton, styles.deleteButtonOutline]}>
             <Text style={styles.deleteButtonText}>Delete</Text>
@@ -669,9 +685,9 @@ const styles = StyleSheet.create({
   },
   dashboardContainer: { 
     flex: 1, 
-    padding: 20, 
+    padding: 20,
+    backgroundColor: '#0b0f19',
     paddingTop: 60, 
-    backgroundColor: '#0b0f19' 
   },
   headerRow: { 
     flexDirection: 'row', 
@@ -685,10 +701,13 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     fontWeight: '700',
   },
-  welcomeText: { 
-    fontSize: 20, 
-    fontWeight: 'bold',
-    color: '#f8fafc' 
+  userName: { 
+    fontSize: 18, 
+    fontWeight: '700',
+    color: '#38bdf8',
+    textShadowColor: 'rgba(56, 189, 248, 0.4)',
+    textShadowOffset: { width: 0, height: 0},
+    textShadowRadius: 8
   },
   headerActionsRow: {
     flexDirection: 'row',
