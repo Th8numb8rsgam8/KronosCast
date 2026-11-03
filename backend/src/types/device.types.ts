@@ -23,8 +23,9 @@ export interface RequestSetupRequestBody {
 }
 
 export interface VerifySetupRequestBody {
-  hardware_id?: string;
-  csr: string;
+  hardware_id: string;
+  csr?: string;
+  device_id?: string;
 }
 
 export interface FactoryPayload {

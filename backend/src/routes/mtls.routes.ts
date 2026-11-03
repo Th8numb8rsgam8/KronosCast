@@ -15,7 +15,8 @@ router.post('/api/v1/devices/mqtt-request', async (req: Request, res: Response):
         return res.status(401).json({ error: "Client certificate missing from handshake context" });
     }
     
-    const deviceId: string = clientCert.subject.CN;
+    const device_username: string = clientCert.subject.CN;
+    const deviceId: string = device_username.replace(/^device_/, '');
     const client = await pool.connect();
     const deviceQuery = `
       SELECT hardware_id, user_id

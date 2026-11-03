@@ -18,8 +18,8 @@ import { ENV } from '../config/env';
 import { apiClient } from '../api/interceptor';
 
 const AVAILABLE_COMMANDS: DeviceCommand[] = [
-  { label: 'StreamSwitch On', actionValue: 'STREAMSWITCH_ON', buttonColor: '#007AFF' },
-  { label: 'StreamSwitch Off', actionValue: 'STREAMSWITCH_OFF', buttonColor: '#d9534f' },
+  { label: 'SSNano On', actionValue: 'STREAMSWITCH_ON', buttonColor: '#007AFF' },
+  { label: 'SSNano Off', actionValue: 'STREAMSWITCH_OFF', buttonColor: '#d9534f' },
   { label: 'Reboot Device', actionValue: 'REBOOT', buttonColor: '#f0ad4e' },
   // { label: 'Calibrate Sensor', actionValue: 'CALIBRATE', buttonColor: '#5cb85c' },
 ];
@@ -155,6 +155,7 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
           // If active for more than 15 seconds without communication, set offline
           if (nextStatus[deviceId] === 'online' && now - lastSeen > 15000) {
             nextStatus[deviceId] = 'offline';
+            setDeviceTelemetryMap((prev) => ({ ...prev, [deviceId]: null }));
             updated = true;
           }
         });
@@ -192,7 +193,23 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
           deviceLastSeenRef.current[deviceId] = Date.now();
 
           if (subType === 'telemetry') {
-            setDeviceTelemetryMap((prev) => ({ ...prev, [deviceId]: data }));
+
+            const processedData = { ... data};
+
+            Object.keys(processedData).forEach((key) => {
+
+              // Handle Raspberry Pi temperature formatting
+              if (key === "Operating Temperature") {
+                const celsius = processedData[key] / 1000;
+                processedData[key] = `${celsius.toFixed(1)}°C`;
+              }
+
+              if (key === "SSNano Service") {
+                const ssnano_status = processedData[key];
+                processedData[key] = ssnano_status.toUpperCase();
+              }
+            });
+            setDeviceTelemetryMap((prev) => ({ ...prev, [deviceId]: processedData }));
           } else if (subType === 'status') {
             const statusValue = typeof data === 'object' ? (data.status || 'online') : data;
             setDeviceStatusMap((prev) => ({ ...prev, [deviceId]: statusValue }));
@@ -273,13 +290,8 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
           style: 'destructive',
           onPress: async () => {
             try {
-              //const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/devices/${user.id}/${deviceId}`, {
-              //  method: 'DELETE',
-              //});
-
-              const response = await apiClient.delete(`/api/devices/${user.id}/${deviceId}`);
+              await apiClient.delete(`/api/devices/${user.id}/${deviceId}`);
               
-              // if (response.ok) {
               // Remove the device from local state immediately
               setDevices((prevDevices) => prevDevices.filter((d) => d.id !== deviceId));
                 
@@ -289,9 +301,6 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
               }
                 
               Alert.alert('Success', 'Device removed successfully.');
-              // } else {
-              //   Alert.alert('Error', 'Failed to delete the device on the server.');
-              // }
             } catch (err) {
               Alert.alert('Error', `${err}`);
               // Alert.alert('Error', 'Network error while deleting device.');
@@ -313,22 +322,8 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
           style: 'destructive',
           onPress: async () => {
             try {
-              // Assuming authState contains the JWT token and user ID
-              // const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/users/${user.id}`, {
-              //   method: 'DELETE',
-              //   headers: {
-              //     'Authorization': `Bearer ${authState.token}`, // Pass your token for security
-              //   },
-              // });
-
-              const response = await apiClient.delete(`/api/auth/users/${user.id}`);
-
-              // if (response.ok) {
-                // Alert.alert('Account Deleted', 'Your account has been successfully removed.');
+              await apiClient.delete(`/api/auth/users/${user.id}`);
               onLogout(); // Clears authState and returns to login screen
-              // } else {
-              //   Alert.alert('Error', 'Failed to delete account on the server.');
-              // }
             } catch (err: any) {
               // console.error('Account deletion error:', err);
               const serverMessage = 
@@ -383,20 +378,32 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
       </TouchableOpacity>
     );
   };
-
-  const renderTelemetryData = (telemetryObj: any) => {
+const renderTelemetryData = (telemetryObj: any) => {
     if (!telemetryObj || typeof telemetryObj !== 'object') {
       return <Text style={styles.telemetryPlaceholder}>Waiting for telemetry metrics...</Text>;
     }
 
     return (
       <View style={styles.telemetryGrid}>
-        {Object.entries(telemetryObj).map(([key, value]) => (
-          <View key={key} style={styles.telemetryCard}>
-            <Text style={styles.telemetryKey}>{key.replace(/_/g, ' ').toUpperCase()}</Text>
-            <Text style={styles.telemetryValue}>{String(value)}</Text>
-          </View>
-        ))}
+        {Object.entries(telemetryObj).map(([key, value]) => {
+          const stringVal = String(value).toUpperCase();
+          const isStsOn = stringVal === 'ACTIVE';
+          const isStsOff = stringVal === 'INACTIVE';
+
+          // Determine dynamic color if it's a status metric
+          let valueColor = '#38bdf8'; // Default blue for normal metrics
+          if (isStsOn) valueColor = '#10b981'; // Green for ON
+          if (isStsOff) valueColor = '#ef4444'; // Red for OFF
+
+          return (
+            <View key={key} style={styles.telemetryCard}>
+              <Text style={styles.telemetryKey}>{key.replace(/_/g, ' ').toUpperCase()}</Text>
+              <Text style={[styles.telemetryValue, { color: valueColor }]}>
+                {String(value)}
+              </Text>
+            </View>
+          );
+        })}
       </View>
     );
   };

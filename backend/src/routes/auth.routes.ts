@@ -3,6 +3,7 @@ import jwt, { SignOptions } from 'jsonwebtoken';
 import { pool } from "../config/database";
 import { PoolClient, DatabaseError } from "pg";
 import mqttAdminClient from "../services/mqtt.service";
+import jsrsasign from 'jsrsasign';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import axios from 'axios';
@@ -257,15 +258,36 @@ router.post(
     });
   }
 
-  // 2. Separate "Bearer" from the actual JWT string
+  // Separate "Bearer" from the actual JWT string
   const token = authHeader.split(' ')[1];
 
-  // 3. Extract hardware_id from the JSON request body
-  const { hardware_id, csr } = req.body;
+  const { csr } = req.body;
 
-  if (!hardware_id || !csr) {
+  if (!csr) {
     return res.status(400).json({ 
-      error: 'Bad Request: Missing Hardware ID or CSR in request body.' 
+      error: 'Bad Request: Missing Certificate Signing Request from device.' 
+    });
+  }
+
+  const csrParam = jsrsasign.KJUR.asn1.csr.CSRUtil.getParam(csr);
+
+  // Read the Common Name (CN) directly from the parsed subject metadata map
+  if (!csrParam || !csrParam.subject || !csrParam.subject.str) {
+      return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR." });
+  }
+        
+  const subjectString: string = csrParam.subject.str;
+
+  const cnMatch = subjectString.match(/CN=([^/]+)/);
+  if (!cnMatch) {
+      return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR string." });
+  }
+
+  const hardware_id: string = cnMatch[1];
+
+  if (!hardware_id) {
+    return res.status(400).json({ 
+      error: 'Bad Request: Missing Hardware ID in CSR.' 
     });
   }
 
@@ -282,26 +304,6 @@ router.post(
       await client.query('ROLLBACK');
       return res.status(403).send('Invalid token scope for this action');
     }
-
-    // ─────────────────────────────────────────────────────────────
-    // Check device_whitelist for hardware_id validity
-    // ─────────────────────────────────────────────────────────────
-
-    // const csrParam = jsrsasign.KJUR.asn1.csr.CSRUtil.getParam(csr);
-
-    // // Read the Common Name (CN) directly from the parsed subject metadata map
-    // if (!csrParam || !csrParam.subject || !csrParam.subject.str) {
-    //     return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR." });
-    // }
-    //       
-    // const subjectString: string = csrParam.subject.str;
-
-    // const cnMatch = subjectString.match(/CN=([^/]+)/);
-    // if (!cnMatch) {
-    //     return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR string." });
-    // }
-
-    // const hardware_id: string = cnMatch[0];
 
     const whitelistResult = await client.query(
       `SELECT id, status
@@ -322,117 +324,62 @@ router.post(
       return res.status(400).json({ error: 'Device is not authorized for registration.' });
     }
 
-    if (whitelistEntry.status === 'active' && whitelistEntry.user_id !== decoded.userId) {
+    if (whitelistEntry.status === 'active') {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Device is already registered by another user.' });
     }
 
-    if (whitelistEntry.status === 'active') {
-      const registered_device = await client.query<DeviceRow>(
-        `SELECT id, user_id
-         FROM devices 
-         WHERE hardware_id = $1`,
-        [hardware_id]
-      );
+    // Create new device ID
+    const uuidResult = await client.query<{ id: string }>('SELECT uuid_generate_v4() AS id');
+    const deviceId = uuidResult.rows[0].id;
 
-      let signedCertificate: string | null = null;
-      if (csr !== "certificate_healthy") {
-        // Request signature from your local CFSSL container on port 8888
-        const cfsslResponse = await axios.post<CFSSLSignedResponse>('http://localhost:8888/api/v1/cfssl/sign', {
-            certificate_request: csr,
-            profile: "client",
-            subject: {
-              CN: registered_device.rows[0].id
-            }
-        });
-        signedCertificate = cfsslResponse.data.result.certificate;
-      }
+    // Request signature from local CFSSL container on port 8888
+    const cfsslResponse = await axios.post<CFSSLSignedResponse>('http://localhost:8888/api/v1/cfssl/sign', {
+        certificate_request: csr,
+        profile: "client",
+        subject: {
+          CN: `device_${deviceId}`
+        }
+    });
 
-      // const topics = getDeviceMqttTopics(registered_device.rows[0].user_id, registered_device.rows[0].id);
-      await client.query('COMMIT');
+    // Insert device into database
+    const newDevice = await client.query<Pick<DeviceRow, 'id' | 'user_id' | 'device_name'>>(
+      `INSERT INTO devices (id, user_id, device_name, hardware_id) 
+       VALUES ($1, $2, $3, $4) 
+       RETURNING id, user_id, device_name`,
+      [deviceId, decoded.userId, decoded.deviceName, hardware_id.trim()]
+    );
+    const device = newDevice.rows[0];
 
-      // Return configuration packet to the edge device
-      return res.json({
-        message: 'Device successfully verified and provisioned!',
-        // mqtt: {
-        //   brokerUrl: MQTT_DEVICE_URL,
-        //   topics: {
-        //     telemetry: topics.telemetry,
-        //     status: topics.status,
-        //     commands: topics.commands,
-        //   }
-        // },
-        signed_certificate: signedCertificate
-      });
-    }
-    else { // pre-authorized (not registered)
+    const mqttUsername = await provisionEdgeDeviceInMosquitto(device.id, device.user_id);
 
-      // Create new device ID
-      const uuidResult = await client.query<{ id: string }>('SELECT uuid_generate_v4() AS id');
-      const deviceId = uuidResult.rows[0].id;
+    // 5. Save the hardware_id and update MQTT credentials in PostgreSQL
+    await client.query(
+      `UPDATE devices 
+       SET mqtt_username = $1
+       WHERE id = $2`,
+      [mqttUsername, device.id]
+    );
 
-      let signedCertificate: string | null = null;
-      if (csr !== "certificate_healthy") {
-        // Request signature from your local CFSSL container on port 8888
-        const cfsslResponse = await axios.post<CFSSLSignedResponse>('http://localhost:8888/api/v1/cfssl/sign', {
-            certificate_request: csr,
-            profile: "client",
-            subject: {
-              CN: deviceId
-            }
-        });
-        signedCertificate = cfsslResponse.data.result.certificate;
-      }
+    // ─────────────────────────────────────────────────────────────
+    // Update device_whitelist to link user and mark as active
+    // ─────────────────────────────────────────────────────────────
+    await client.query(
+      `UPDATE device_whitelist 
+       SET status = 'active', 
+           user_id = $1, 
+           registered_at = NOW() 
+       WHERE hardware_id = $2`,
+      [decoded.userId, hardware_id]
+    );
 
-      // Insert device into database
-      const newDevice = await client.query<Pick<DeviceRow, 'id' | 'user_id' | 'device_name'>>(
-        `INSERT INTO devices (id, user_id, device_name, hardware_id) 
-         VALUES ($1, $2, $3, $4) 
-         RETURNING id, user_id, device_name`,
-        [deviceId, decoded.userId, decoded.deviceName, hardware_id.trim()]
-      );
-      const device = newDevice.rows[0];
+    await client.query('COMMIT');
 
-      const mqttUsername = await provisionEdgeDeviceInMosquitto(device.id, device.user_id);
-
-      // 5. Save the hardware_id and update MQTT credentials in PostgreSQL
-      await client.query(
-        `UPDATE devices 
-         SET mqtt_username = $1
-         WHERE id = $2`,
-        [mqttUsername, device.id]
-      );
-
-      // ─────────────────────────────────────────────────────────────
-      // Update device_whitelist to link user and mark as active
-      // ─────────────────────────────────────────────────────────────
-      await client.query(
-        `UPDATE device_whitelist 
-         SET status = 'active', 
-             user_id = $1, 
-             registered_at = NOW() 
-         WHERE hardware_id = $2`,
-        [decoded.userId, hardware_id]
-      );
-
-      // Dynamically generate the topic structures
-      // const topics = getDeviceMqttTopics(device.user_id, device.id);
-      await client.query('COMMIT');
-
-      // Return configuration packet to the edge device
-      return res.json({
-        message: 'Device successfully verified and provisioned!',
-        // mqtt: {
-        //   brokerUrl: MQTT_DEVICE_URL,
-        //   topics: {
-        //     telemetry: topics.telemetry,
-        //     status: topics.status,
-        //     commands: topics.commands,
-        //   }
-        // },
-        signed_certificate: signedCertificate
-      });
-    }
+    // Return signed certificate to the edge device
+    return res.json({
+      message: 'Device successfully verified and provisioned!',
+      signed_certificate: cfsslResponse.data.result.certificate
+    });
   }
   catch (err: unknown) {
     await client.query('ROLLBACK');
