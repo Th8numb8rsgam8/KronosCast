@@ -13,10 +13,12 @@ services:
       if [ ! -f /mosquitto/config/dynamic-security.json ]; then
         echo 'Generating dynamic-security.json...';
         mosquitto_ctrl dynsec init /mosquitto/config/dynamic-security.json \$MQTT_ADMIN_USER \$MQTT_ADMIN_PASS;
-        chmod 644 /mosquitto/config/dynamic-security.json;
       else
         echo 'dynamic-security.json already exists. Skipping.';
-      fi
+      fi;
+      chown -R 1883:1883 /mosquitto/config;
+      chmod 775 /mosquitto/config;
+      chmod 664 /mosquitto/config/dynamic-security.json;
       "
 
   cfssl:
@@ -47,16 +49,19 @@ services:
     volumes:
       - certbot-etc:/etc/letsencrypt
       - certbot-var:/var/www/certbot
+    environment:
+      - DOMAIN_NAME=${DOMAIN_NAME}
+    ports:
+      - "80:80"
     # This command only runs if the live folder doesn't exist yet, then exits cleanly
     entrypoint: >
       /bin/sh -c "
         if [ ! -d /etc/letsencrypt/live/${DOMAIN_NAME} ]; then
           echo 'Generating initial SSL certificate...';
-          certbot certonly --standalone \
-            -d ${DOMAIN_NAME} \
-            -d www.${DOMAIN_NAME} \
-            --register-unsafely-without-email \
-            --agree-tos;
+          certbot certonly --standalone -d ${DOMAIN_NAME} --register-unsafely-without-email --agree-tos;
+
+          chmod -R 755 /etc/letsencrypt/live;
+          chmod -R 755 /etc/letsencrypt/archive;
         else
           echo 'SSL certificate already exists. Skipping init.';
         fi
@@ -65,7 +70,7 @@ services:
   certbot:
     image: certbot/certbot:nightly
     container_name: certbot_renewer
-    restart: unless-stoped
+    restart: unless-stopped
     depends_on:
       certbot-init:
         condition: service_completed_successfully
@@ -95,6 +100,19 @@ services:
       node_app: 
         condition: service_started
 
+  init-mosquitto:
+    image: eclipse-mosquitto:2.1.2-alpine
+    container_name: mosquitto_init
+    volumes:
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    command: >
+      sh -c "
+        chown -R 1883:1883 /mosquitto/data /mosquitto/log &&
+        chmod 755 /mosquitto/data &&
+        chmod 775 /mosquitto/log
+      "
+
   mosquitto:
     image: eclipse-mosquitto:2.1.2-alpine
     container_name: mosquitto_broker
@@ -104,16 +122,16 @@ services:
       cfssl:
         condition: service_started
     ports:
-      - "1883:1883"   # Standard MQTT Port
+      - "1883:1883"   # Standard MQTT Port for NodeJS Admin User
       - "8883:8883"   # MQTTS over mTLS (Edge Devices)
-      - "9001:9001"
+      - "9001:9001"   # Websockets Connection for Mobile App
     networks:
       - iot_production_network
     volumes:
       # Bind mounts to host directories
       - ./eclipse-mosquitto/config:/mosquitto/config
-      - ./eclipse-mosquitto/data:/mosquitto/data
-      - ./eclipse-mosquitto/log:/mosquitto/log
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
       # - ./certbot-certs/server.crt:/mosquitto/config/certs/server.crt:ro
       # - ./certbot-certs/server.key:/mosquitto/config/certs/server.key:ro
       - certbot-etc:/etc/letsencrypt:ro
@@ -173,3 +191,5 @@ volumes:
   certbot-var:    # Shared webroot validation challenge path
   cfssl-certs:    # Shared private root CA file (ca.pem)
   postgres-data:
+  mosquitto-data:
+  mosquitto-log:

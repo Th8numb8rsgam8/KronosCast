@@ -13,6 +13,7 @@ import factoryRoutes from './routes/factory.routes';
 import videoRoutes from './routes/video.routes';
 import mtlsRoutes from './routes/mtls.routes';
 import { initDb } from './config/database';
+import { ENV } from './config/env';
 
 const publicApp: Application = express();
 publicApp.set('trust proxy', 'loopback'); // Trust the loopback interface for proxy headers
@@ -28,8 +29,8 @@ mtlsApp.use(express.json());
 mtlsApp.use('/iot', mtlsRoutes);
 
 const mtlsOptions: https.ServerOptions = {
-  key: process.env.NODE_ENV === 'production' ? fs.readFileSync('/certs/server.key') : fs.readFileSync('./certbot-certs/server.key'),
-  cert: process.env.NODE_ENV === 'production' ? fs.readFileSync('/certs/server.crt'): fs.readFileSync('./certbot-certs/server.crt'),
+  key: process.env.NODE_ENV === 'production' ? fs.readFileSync(`/etc/letsencrypt/live/${process.env.DOMAIN_NAME}/privkey.pem`) : fs.readFileSync('./certbot-certs/server.key'),
+  cert: process.env.NODE_ENV === 'production' ? fs.readFileSync(`/etc/letsencrypt/live/${process.env.DOMAIN_NAME}/fullchain.pem`): fs.readFileSync('./certbot-certs/server.crt'),
   ca: [process.env.NODE_ENV === 'production' ? fs.readFileSync('/app/cfssl-config/ca.pem') : fs.readFileSync('./cfssl/cfssl-config/ca.pem')],
   requestCert: true,       // Force mTLS checking
   rejectUnauthorized: true // Drop connections without a valid client certificate
@@ -40,11 +41,11 @@ const startServer = async () => {
     await initDb();
     console.log('📦 Database initialized successfully.');
 
-    http.createServer(publicApp).listen(80, () => {
-        console.log('🌐 Port 80: Public Enrollment HTTP Server Active');
+    http.createServer(publicApp).listen(process.env.UNENCRYPTED_PORT, () => {
+        console.log('🌐 Port 3000: Public Enrollment HTTP Server Active');
     });
 
-    https.createServer(mtlsOptions, mtlsApp).listen(8443, () => {
+    https.createServer(mtlsOptions, mtlsApp).listen(process.env.MTLS_BACKEND_PORT, () => {
         console.log('🔒 Port 8443: Secure mTLS HTTPS Server Active');
     });
   } catch(error) {
