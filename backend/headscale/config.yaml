@@ -1,0 +1,30 @@
+# The public URL where Headscale's coordination server will be reached
+server_url: https://headscale.kronoscast.com
+
+# Listen addresses
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 127.0.0.1:9090
+
+# Database configuration (SQLite is great for self-hosted setups)
+db_type: sqlite3
+db_path: /var/lib/headscale/db.sqlite
+
+# Enable automatic TLS management, or set to false if Nginx handles SSL termination
+tls_cert_path: ""
+tls_key_path: ""
+
+# Network prefix settings for your mesh VPN (Tailscale defaults)
+ip_prefixes:
+  - fd7a:115c:a1e0::/48
+  - 100.64.0.0/10
+
+# Disable regular Tailscale DNS magic if you just want raw IP routing, or configure it if needed
+dns_config:
+  nameservers:
+    - 1.1.1.1
+  base_domain: example.com
+
+derp:
+  server:
+    enabled: true
+    stun_listen_addr: 0.0.0.0:3478
