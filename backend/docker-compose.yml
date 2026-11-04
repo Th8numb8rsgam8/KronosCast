@@ -1,6 +1,6 @@
 services:
   init-dynsec:
-    image: eclipse-mosquitto:2
+    image: eclipse-mosquitto:2.1.2-alpine
     container_name: init_dynsec
     environment:
       - MQTT_ADMIN_USER=${MQTT_ADMIN_USER:-admin}
@@ -20,7 +20,7 @@ services:
       "
 
   cfssl:
-    image: cfssl/cfssl:latest
+    image: cfssl/cfssl:v1.7.1
     container_name: cfssl_ca
     entrypoint: >
       /bin/sh -c "
@@ -34,15 +34,69 @@ services:
       "
     networks:
       - iot_production_network
-    ports:
-      - "8888:8888"
+    # ports:
+    #   - "8888:8888"
     volumes:
       - ./cfssl/cfssl-config:/etc/cfssl
       - ./cfssl/cfssl-public:/etc/cfssl-public
     restart: unless-stopped
 
+  certbot-init:
+    image: certbot/certbot:nightly
+    container_name: certbot_init
+    volumes:
+      - certbot-etc:/etc/letsencrypt
+      - certbot-var:/var/www/certbot
+    # This command only runs if the live folder doesn't exist yet, then exits cleanly
+    entrypoint: >
+      /bin/sh -c "
+        if [ ! -d /etc/letsencrypt/live/${DOMAIN_NAME} ]; then
+          echo 'Generating initial SSL certificate...';
+          certbot certonly --standalone \
+            -d ${DOMAIN_NAME} \
+            -d www.${DOMAIN_NAME} \
+            --register-unsafely-without-email \
+            --agree-tos;
+        else
+          echo 'SSL certificate already exists. Skipping init.';
+        fi
+      "
+
+  certbot:
+    image: certbot/certbot:nightly
+    container_name: certbot_renewer
+    restart: unless-stoped
+    depends_on:
+      certbot-init:
+        condition: service_completed_successfully
+    volumes:
+      - certbot-etc:/etc/letsencrypt
+      - certbot-var:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12d & wait $${!}; done;'"
+    networks:
+      - iot_production_network
+
+  api-gateway:
+    image: nginx:1.31.8-trixie
+    container_name: nginx_gateway
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - certbot-etc:/etc/letsencrypt:ro
+      - certbot-var:/var/www/certbot:ro
+    networks:
+      - iot_production_network
+    depends_on:
+      certbot-init:
+        condition: service_completed_successfully
+      node_app: 
+        condition: service_started
+
   mosquitto:
-    image: eclipse-mosquitto:2
+    image: eclipse-mosquitto:2.1.2-alpine
     container_name: mosquitto_broker
     depends_on:
       init-dynsec:
@@ -60,34 +114,62 @@ services:
       - ./eclipse-mosquitto/config:/mosquitto/config
       - ./eclipse-mosquitto/data:/mosquitto/data
       - ./eclipse-mosquitto/log:/mosquitto/log
-      - ./certbot-certs/server.crt:/mosquitto/config/certs/server.crt:ro
-      - ./certbot-certs/server.key:/mosquitto/config/certs/server.key:ro
+      # - ./certbot-certs/server.crt:/mosquitto/config/certs/server.crt:ro
+      # - ./certbot-certs/server.key:/mosquitto/config/certs/server.key:ro
+      - certbot-etc:/etc/letsencrypt:ro
       - ./cfssl/cfssl-public:/mosquitto/config/certs/ca_authority:ro
     restart: unless-stopped
 
-  # node_app:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   container_name: node_backend
-  #   restart: unless-stopped
-  #   ports:
-  #     - "80:80"
-  #     - "8443:8443"
-  #   environment:
-  #     - NODE_ENV=production
-  #     - JWT_SECRET=${JWT_SECRET}
-  #     - DATABASE_URL=${DATABASE_URL}
-  #   networks:
-  #     - iot_production_network
-  #   volumes:
-  #     - ./cfssl/cfssl-public:/app/cfssl-config:ro
-  #     - ./certbot-certs/server.crt:/certs/server.crt:ro
-  #     - ./certbot-certs/server.key:/certs/server.key:ro
-  #   depends_on:
-  #     cfssl:
-  #       condition: service_started
+  node_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: node_backend
+    restart: unless-stopped
+    ports:
+      # - "80:80"
+      - "8443:8443"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+    networks:
+      - iot_production_network
+    volumes:
+      - ./cfssl/cfssl-public:/app/cfssl-config:ro
+      # - ./certbot-certs/server.crt:/certs/server.crt:ro
+      # - ./certbot-certs/server.key:/certs/server.key:ro
+      - certbot-etc:/etc/letsencrypt:ro
+      - ./public_key.pem:/app/public_key.pem
+    depends_on:
+      cfssl:
+        condition: service_started
+      postgres:
+        condition: service_started
+      certbot-init:
+        condition: service_completed_successfully
+
+  postgres:
+      image: postgres:16-alpine
+      container_name: postgres_db
+      restart: unless-stopped
+      environment:
+        - POSTGRES_USER=${DB_USER:-postgres}
+        - POSTGRES_PASSWORD=${DB_PASSWORD:-secretpassword}
+        - POSTGRES_DB=${DB_NAME:-iot_production}
+      # ports:
+      #   - "5432:5432"
+      networks:
+        - iot_production_network
+      volumes:
+        - postgres-data:/var/lib/postgresql/data
 
 networks:
   iot_production_network:
     driver: bridge
+
+volumes:
+  certbot-etc:    # Shared public server certificates
+  certbot-var:    # Shared webroot validation challenge path
+  cfssl-certs:    # Shared private root CA file (ca.pem)
+  postgres-data:

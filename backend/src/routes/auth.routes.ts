@@ -334,7 +334,8 @@ router.post(
     const deviceId = uuidResult.rows[0].id;
 
     // Request signature from local CFSSL container on port 8888
-    const cfsslResponse = await axios.post<CFSSLSignedResponse>('http://localhost:8888/api/v1/cfssl/sign', {
+    const cfsslDomain = process.env.NODE_ENV === 'production' ? 'cfssl' : 'localhost';
+    const cfsslResponse = await axios.post<CFSSLSignedResponse>(`http://${cfsslDomain}:8888/api/v1/cfssl/sign`, {
         certificate_request: csr,
         profile: "client",
         subject: {

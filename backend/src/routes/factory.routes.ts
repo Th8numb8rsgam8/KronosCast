@@ -6,7 +6,15 @@ import { FactoryPayload } from '../types/device.types'
 
 const router = Router();
 
-const PUBLIC_KEY_PEM = fs.readFileSync('./public_key.pem', 'utf8');
+let PUBLIC_KEY_PEM: string;
+if (process.env.NODE_ENV === 'production')
+{
+  PUBLIC_KEY_PEM = fs.readFileSync('/app/public_key.pem', 'utf8');
+}
+else
+{
+  PUBLIC_KEY_PEM = fs.readFileSync('./public_key.pem', 'utf8');
+}
 
 router.post('/registration', async (req: Request, res: Response): Promise<any> => {
   try {

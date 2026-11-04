@@ -28,21 +28,12 @@ mtlsApp.use(express.json());
 mtlsApp.use('/iot', mtlsRoutes);
 
 const mtlsOptions: https.ServerOptions = {
-  key: fs.readFileSync('./certbot-certs/server.key'),
-  cert: fs.readFileSync('./certbot-certs/server.crt'),
-  ca: [fs.readFileSync('./cfssl/cfssl-config/ca.pem')],
+  key: process.env.NODE_ENV === 'production' ? fs.readFileSync('/certs/server.key') : fs.readFileSync('./certbot-certs/server.key'),
+  cert: process.env.NODE_ENV === 'production' ? fs.readFileSync('/certs/server.crt'): fs.readFileSync('./certbot-certs/server.crt'),
+  ca: [process.env.NODE_ENV === 'production' ? fs.readFileSync('/app/cfssl-config/ca.pem') : fs.readFileSync('./cfssl/cfssl-config/ca.pem')],
   requestCert: true,       // Force mTLS checking
   rejectUnauthorized: true // Drop connections without a valid client certificate
 }
-
-// Extend Express Request interface to include the authenticated user property
-// declare global {
-//   namespace Express {
-//     interface Request {
-//       user?: string | JwtPayload | UserPayload;
-//     }
-//   }
-// }
 
 const startServer = async () => {
   try {

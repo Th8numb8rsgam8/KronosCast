@@ -1,29 +1,43 @@
-# --- Stage 1: Build Environment ---
+# ==========================================
+# Stage 1: Build / Compile TypeScript
+# ==========================================
 FROM node:20-alpine AS builder
+
 WORKDIR /app
 
-# Copy dependency mappings and install everything
-COPY package*.json ./
+# Copy package manifests
+COPY package.json package-lock.json ./
+
+# Install ALL dependencies (including devDependencies like typescript and tsx)
 RUN npm ci
 
-# Copy source code and compile TypeScript to production JavaScript
-COPY . .
-RUN npx tsc
+RUN npm install -g typescript
 
-# --- Stage 2: Final Runtime Environment ---
+# Copy source code and TypeScript config
+COPY tsconfig.json ./
+COPY src/ ./src/
+
+# Compile TypeScript code (this generates your /dist folder)
+RUN npm run build
+
+# ==========================================
+# Stage 2: Production Runtime Image
+# ==========================================
 FROM node:20-alpine AS runner
+
 WORKDIR /app
-ENV NODE_ENV=production
 
-# Copy only production dependencies to keep the image tiny
-COPY package*.json ./
-RUN npm ci --only=production
+# Create a non-root system user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 -G nodejs
 
-# Copy the compiled build assets from Stage 1
-COPY --from=builder /app/dist ./dist
+# Copy dependency manifests and install production-only dependencies
+COPY package.json package-lock.json ./
+RUN npm ci --only=production && npm cache clean --force
 
-# Expose ports internally (Port 80 for public, Port 8443 for mTLS)
-EXPOSE 80
-EXPOSE 8443
+# Copy ONLY the compiled output from the builder stage
+COPY --chown=nodejs:nodejs --from=builder /app/dist ./dist
+USER nodejs
 
+# Point to your compiled JavaScript output file
 CMD ["node", "dist/server.js"]
