@@ -56,15 +56,7 @@ services:
     # This command only runs if the live folder doesn't exist yet, then exits cleanly
     entrypoint: >
       /bin/sh -c "
-        if [ ! -d /etc/letsencrypt/live/${DOMAIN_NAME} ]; then
-          echo 'Generating initial SSL certificate...';
-          certbot certonly --standalone -d ${DOMAIN_NAME} --register-unsafely-without-email --agree-tos;
-
-          chmod -R 755 /etc/letsencrypt/live;
-          chmod -R 755 /etc/letsencrypt/archive;
-        else
-          echo 'SSL certificate already exists. Skipping init.';
-        fi
+        certbot certonly --standalone -d edge.kronoscast.com --expand --register-unsafely-without-email --agree-tos;
       "
 
   certbot:
@@ -99,6 +91,40 @@ services:
         condition: service_completed_successfully
       node_app: 
         condition: service_started
+
+  headscale:
+    image: headscale/headscale:main-5651bf4
+    # image: headscale/headscale:latest
+    container_name: headscale
+    restart: unless-stopped
+    command: serve
+    volumes:
+      - ./headscale/config:/etc/headscale
+      - headscale-data:/var/lib/headscale
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "3478:3478/udp"
+    networks:
+      - iot_production_network
+
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale_node
+    restart: unless-stopped
+    hostname: droplet-gateway
+    environment:
+      - TS_AUTHKEY=${HEADSCALE_PREAUTH_KEY}
+      - TS_EXTRA_ARGS=--login-server=http://headscale:8080
+      - TS_STATE_DIR=/var/lib/tailscale
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    networks:
+      - iot_production_network
+    volumes:
+      - tailscale-data:/var/lib/tailscale
+    depends_on:
+      - headscale
 
   init-mosquitto:
     image: eclipse-mosquitto:2.1.2-alpine
@@ -193,3 +219,5 @@ volumes:
   postgres-data:
   mosquitto-data:
   mosquitto-log:
+  headscale-data:
+  tailscale-data:

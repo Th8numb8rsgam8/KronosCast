@@ -1,0 +1,50 @@
+# The public URL where Headscale's coordination server will be reached
+server_url: https://edge.kronoscast.com
+
+# Listen addresses
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 127.0.0.1:9090
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+# Network prefix settings for the mesh VPN (Tailscale defaults)
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+# Database configuration (SQLite is great for self-hosted setups)
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+
+# Enable automatic TLS management, or set to false if Nginx handles SSL termination
+tls:
+  cert_path: ""
+  key_path: ""
+
+# Disable regular Tailscale DNS magic if you just want raw IP routing, or configure it if needed
+dns:
+  magic_dns: true
+  base_domain: internal.kronoscast.com
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 8.8.8.8
+  override_local_dns: true
+
+derp:
+  server:
+    enabled: true
+
+    region_id: 999
+    region_code: "headscale"
+    region_name: "Headscale Edge DERP"
+    stun_listen_addr: 0.0.0.0:3478
+    verify_clients: true
+
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    
