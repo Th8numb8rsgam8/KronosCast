@@ -9,7 +9,7 @@ import crypto from 'crypto';
 import axios from 'axios';
 import { createUserAccountDeleteHandler } from "../controllers/auth.controller";
 import { verifyJwtMiddleware } from "../middleware/auth.middleware";
-import { generateAccessToken, generateRefreshToken } from '../controllers/auth.controller';
+import { generateAccessToken, generateRefreshToken, generateHeadscalePreauthKey, createHeadscaleUser } from '../controllers/auth.controller';
 import { provisionMqttUserInMosquitto, provisionEdgeDeviceInMosquitto, buildMqttResponseObject } from "../services/mqtt.service";
 import { SignupRequestBody, LoginRequestBody, UserPayload, UserRow } from "../types/user.types";
 import { DeviceRow, SetupJwtPayload, VerifySetupRequestBody } from "../types/device.types";
@@ -76,6 +76,8 @@ router.post(
         'UPDATE users SET mqtt_username = $1, mqtt_password_hash = $2 WHERE id = $3',
         [mqttUsername, mqttPasswordHash, newUser.id]
       );
+
+	  const createdHeadscaleUser: boolean = await createHeadscaleUser(newUser.id);
 
       await client.query('COMMIT');
 
@@ -334,14 +336,16 @@ router.post(
     const deviceId = uuidResult.rows[0].id;
 
     // Request signature from local CFSSL container on port 8888
-    const cfsslDomain = process.env.NODE_ENV === 'production' ? 'cfssl' : 'localhost';
-    const cfsslResponse = await axios.post<CFSSLSignedResponse>(`http://${cfsslDomain}:8888/api/v1/cfssl/sign`, {
-        certificate_request: csr,
-        profile: "client",
-        subject: {
-          CN: `device_${deviceId}`
-        }
-    });
+    // const cfsslDomain = process.env.NODE_ENV === 'production' ? 'cfssl' : 'localhost';
+    // const cfsslResponse = await axios.post<CFSSLSignedResponse>(`http://${cfsslDomain}:8888/api/v1/cfssl/sign`, {
+        // certificate_request: csr,
+        // profile: "client",
+        // subject: {
+          // CN: `device_${deviceId}`
+        //}
+    // });
+	
+	const preauthKey = await generateHeadscalePreauthKey(decoded.userId, `tag:edge-device-${decoded.userId}`);
 
     // Insert device into database
     const newDevice = await client.query<Pick<DeviceRow, 'id' | 'user_id' | 'device_name'>>(
@@ -379,7 +383,9 @@ router.post(
     // Return signed certificate to the edge device
     return res.json({
       message: 'Device successfully verified and provisioned!',
-      signed_certificate: cfsslResponse.data.result.certificate
+      // signed_certificate: cfsslResponse.data.result.certificate
+	  preauth_key: preauthKey,
+	  login_server: ENV.HEADSCALE_SUBDOMAIN,
     });
   }
   catch (err: unknown) {

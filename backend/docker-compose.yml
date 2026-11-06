@@ -56,7 +56,11 @@ services:
     # This command only runs if the live folder doesn't exist yet, then exits cleanly
     entrypoint: >
       /bin/sh -c "
-        certbot certonly --standalone -d edge.kronoscast.com --expand --register-unsafely-without-email --agree-tos;
+        echo 'Checking SSL certificate status...';
+        certbot certonly --standalone -d kronoscast.com -d edge.kronoscast.com --register-unsafely-without-email --agree-tos --non-interactive --keep-until-expiring;
+        chmod -R 755 /etc/letsencrypt/live;
+        chmod -R 755 /etc/letsencrypt/archive;
+        exit 0
       "
 
   certbot:
@@ -89,8 +93,6 @@ services:
     depends_on:
       certbot-init:
         condition: service_completed_successfully
-      node_app: 
-        condition: service_started
 
   headscale:
     image: headscale/headscale:main-5651bf4
@@ -112,19 +114,23 @@ services:
     container_name: tailscale_node
     restart: unless-stopped
     hostname: droplet-gateway
+    network_mode: host
     environment:
-      - TS_AUTHKEY=${HEADSCALE_PREAUTH_KEY}
-      - TS_EXTRA_ARGS=--login-server=http://headscale:8080
+      - TS_AUTHKEY=${HEADSCALE_ADMIN_PREAUTH_KEY}
+      - TS_EXTRA_ARGS=--login-server=https://edge.kronoscast.com
       - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=0
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
-    networks:
-      - iot_production_network
+    # networks:
+    #   - iot_production_network
     volumes:
       - tailscale-data:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
     depends_on:
       - headscale
+      - api-gateway
 
   init-mosquitto:
     image: eclipse-mosquitto:2.1.2-alpine

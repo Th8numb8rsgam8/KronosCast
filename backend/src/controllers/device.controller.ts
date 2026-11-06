@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { Pool } from "pg";
 import mqtt from "mqtt";
 
+
 export const createDeviceDeleteHandler = (pool: Pool, mqttAdminClient: mqtt.MqttClient) => {
   return async (req: Request, res: Response): Promise<void> => {
     const { userId, deviceId } = req.params;

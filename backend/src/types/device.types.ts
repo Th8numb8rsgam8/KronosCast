@@ -1,5 +1,17 @@
 import { JwtPayload } from "jsonwebtoken";
 
+export interface PreAuthKeyResponse {
+	preAuthKey?: {
+		key: string;
+		user: string;
+		expiration: string;
+		reusable: boolean;
+		ephemeral: boolean;
+		aclTags: string[];
+	};
+	key?: string;
+}
+
 export interface DeviceRow {
   id: string;
   user_id: string;

@@ -3,6 +3,85 @@ import jwt from 'jsonwebtoken';
 import { Pool } from 'pg';
 import mqtt from 'mqtt';
 import { ENV } from '../config/env';
+import { PreAuthKeyResponse } from '../types/device.types';
+
+export const createHeadscaleUser = async (username: string): Promise<boolean> => {
+	try {
+		const response = await fetch(`${ENV.HEADSCALE_API_URL}/api/v1/user`, {
+			method: 'POST',
+			headers: {
+				'Authorization': `Bearer ${ENV.HEADSCALE_API_KEY}`,
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify({ name: username })
+		});
+
+		if (!response.ok) {
+			const errorText = await response.text();
+			if (response.status === 409 || errorText.includes('already exists')) {
+				console.warn(`User ${username} already exists on Headscale.`);
+				return true;
+			}
+			throw new Error(`Failed to create user: ${response.status} - ${errorText}`);
+		}
+
+		console.log(`Successfully created Headscale user: ${username}`);
+		return true;
+	} catch (error) {
+		console.error('Error in createUser:', error);
+		throw error;
+	}
+}
+
+export const generateHeadscalePreauthKey = async (username: string, tag: string): Promise<string> => {
+
+	const headscaleUsers = await fetch(`${ENV.HEADSCALE_API_URL}/api/v1/user`, {
+		method: 'GET',
+		headers: {
+			'Authorization': `Bearer ${ENV.HEADSCALE_API_KEY}`,
+			'Content-Type': 'application/json'
+		}
+	});
+
+	if (!headscaleUsers.ok) {
+		throw new Error(`Failed to fetch Headscale users list: ${headscaleUsers.status}`);
+	}
+	const userData = (await headscaleUsers.json()) as { users: Array<{ id: number; name: string }> };
+	const matchedUser = userData.users.find((u) => u.name === username);
+
+	if (!matchedUser) {
+		throw new Error(`Could not find numerid ID for Headscale user: ${username}`);
+	}
+
+	const response = await fetch(`${ENV.HEADSCALE_API_URL}/api/v1/preauthkey`, {
+		method: 'POST',
+		headers: {
+			'Authorization': `Bearer ${ENV.HEADSCALE_API_KEY}`,
+			'Content-Type': 'application/json'
+		},
+		body: JSON.stringify({
+			user: matchedUser.id.toString(),
+			reusable: false,
+			ephemeral: false,
+			expiration: new Date(Date.now() + 30 * 50 * 1000).toISOString(),
+			aclTags: [tag],
+		}),
+	});
+
+	if (!response.ok) {
+		const errorBody = await response.text();
+		throw new Error(`Headscale API error (${response.status}): ${errorBody}`);
+	}
+
+	const data = (await response.json()) as PreAuthKeyResponse;
+
+	const key = data.preAuthKey?.key || data.key;
+	if (!key) {
+		throw new Error('Malformed response received from Headscale API: missing key.');
+	}
+
+	return key;
+}
 
 // Generate short-lived Access Token (15 mins)
 export const generateAccessToken = (user: { id: string; username: string }): string => {

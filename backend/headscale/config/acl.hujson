@@ -1,0 +1,14 @@
+{
+	"acls": [
+		{
+			"action": "accept",
+			"src": ["user:$USER"],
+			"dst": ["tag:edge-device-$USER:*"]
+		},
+		{
+			"action": "accept",
+			"src": ["tag:update-server"],
+			"dst": ["tag:edge-device-*:*"]
+		}
+	]
+}
