@@ -1,0 +1,43 @@
+- name: Patch Update
+  hosts: edge_fleet
+  become: yes # Elevate privileges via sudo on remote edge devices
+  serial: 2
+  gather_facts: yes
+
+  tasks:
+    - name: Stop StreamSwitch Service
+      systemd:
+        name: streamswitch.service
+        state: stopped
+
+    # - name: Copy new compiled binary to target
+    #   copy:
+    #     src: ./build_output/streamswitch
+    #     dest: /opt/streamswitch
+    #     owner: root
+    #     group: root
+    #     mode: '0755'
+    #   notify: restart edge service
+
+    # - name: Update apt package cache
+    #   apt:
+    #     update_cache: yes
+    #     cache_valid_time: 3600
+
+    # - name: Safely upgrade all packages
+    #   apt:
+    #     upgrade: safe
+    #     autoremove: yes
+    #   register: apt_upgrade_results
+
+    # - name: Check if a system reboot is required
+    #   stat:
+    #     path: /var/run/reboot-required
+    #   register: reboot_required_file
+
+    # - name: Reboot edge device if packages require it
+    #   reboot:
+    #     msg: "Automated patch update: rebooting edge device post-upgrade."
+    #     connect_timeout: 5
+    #     reboot_timeout: 300
+    #   when: reboot_required_file.stat.exists
