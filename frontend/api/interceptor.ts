@@ -2,7 +2,8 @@ import axios, { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
 import * as SecureStore from 'expo-secure-store';
 import { ENV } from '../config/env';
 
-const BASE_URL = `http://${ENV.BACKEND_IP ?? 'localhost'}:${ENV.BACKEND_PORT ?? '3000'}`;
+// const BASE_URL = `http://${ENV.BACKEND_IP ?? 'localhost'}:${ENV.BACKEND_PORT ?? '3000'}`;
+const BASE_URL = `${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}`
 
 export const apiClient: AxiosInstance = axios.create({
   baseURL: BASE_URL,

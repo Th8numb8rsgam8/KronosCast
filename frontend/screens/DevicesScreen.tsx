@@ -42,7 +42,7 @@ function useMQTT(mqttInfo?: MqttCredentials) {
         setError(null);
 
         const options: IClientOptions = {
-          path: '/',
+          path: '/mqtt', // must match Nginx location block
           username: config.username,
           password: config.password,
           clientId: `app_${config.username}_${Math.random().toString(16).substring(2, 8)}`,
@@ -246,12 +246,8 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
 
   const fetchDevices = async (): Promise<void> => {
     try {
-      // const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/devices/${user.id}`);
       const response = await apiClient.get(`/api/devices/${user.id}`);
-      // const data = await response.json();
-      // if (response.ok) {
       setDevices(response.data.devices || []);
-      // }
     } catch (err) {
       Alert.alert('Error', 'Failed to load user devices.');
     } finally {

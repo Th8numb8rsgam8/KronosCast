@@ -2,7 +2,8 @@ import { z } from 'zod';
 
 const envSchema = z.object({
     BACKEND_PROTOCOL: z.string(),
-    BACKEND_IP: z.string().ip(),
+    // BACKEND_IP: z.string().ip(),
+    BACKEND_IP: z.string(),
     BACKEND_PORT: z.coerce.number(),
     SERVICE_UUID: z.string().uuid(),
     SSID_CHARACTERISTIC_UUID: z.string().uuid(),

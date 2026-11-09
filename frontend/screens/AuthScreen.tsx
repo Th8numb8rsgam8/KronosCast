@@ -21,9 +21,12 @@ const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-
 
 export default function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.ReactElement {
   const [isLoginMode, setIsLoginMode] = useState<boolean>(true);
+  const [pendingVerificationEmail, setPendingVerificationEmail] = useState<string | null>(null);
+
   const [username, setUsername] = useState<string>('');
   const [email, setEmail] = useState<string>('');
   const [password, setPassword] = useState<string>('');
+  const [otpCode, setOtpCode] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
 
   const toggleAuthMode = () => {
@@ -31,6 +34,7 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.Re
     setUsername('');
     setEmail('');
     setPassword('');
+    setPendingVerificationEmail(null);
   };
 
   const handleAuthSubmit = async (): Promise<void> => {
@@ -61,12 +65,10 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.Re
     }
 
     setLoading(true);
-
     const endpoint = isLoginMode ? '/api/auth/login' : '/api/auth/signup';
     const payload = isLoginMode ? { email, password } : { username, email, password };
 
     try {
-        
         const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}${endpoint}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -76,16 +78,25 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.Re
         const data = await response.json();
 
         if (response.ok) {
-            Alert.alert('Success', isLoginMode ? 'Logged in successfully!' : 'Account created successfully!');
+          // Alert.alert('Success', isLoginMode ? 'Logged in successfully!' : 'Account created successfully!');
 
-        // Pass full AuthState (user, token, mqtt credentials) to parent
-        onAuthSuccess({
-          user: data.user,
-          access_token: data.access_token,
-          refresh_token: data.refresh_token,
-          mqtt: data.mqtt,
-        });
+          if (!isLoginMode || data.requiresVerification) {
+            setPendingVerificationEmail(email);
+            Alert.alert('Check Your Email', 'We sent a 6-digit verification code to your inbox.');
+          } else {
+            // Standard login success
+            // Pass full AuthState (user, token, mqtt credentials) to parent
+            onAuthSuccess({
+              user: data.user,
+              access_token: data.access_token,
+              refresh_token: data.refresh_token,
+              mqtt: data.mqtt,
+            });
+          }
       } else {
+        if (data.requiresVerification) {
+          setPendingVerificationEmail(data.email || email);
+        }
         Alert.alert('Authentication Failed', data.error || 'Something went wrong');
       }
     } catch (error) {
@@ -94,6 +105,94 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.Re
       setLoading(false);
     }
   };
+
+  const handleVerifyOtp = async (): Promise<void> => {
+    if (!otpCode || otpCode.length !== 6) {
+      Alert.alert('Error', 'Please enter the full 6-digit verification code.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/auth/verify-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: pendingVerificationEmail, otp: otpCode }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        Alert.alert('Success', 'Email verified successfully!');
+        onAuthSuccess({
+          user: data.user,
+          access_token: data.access_token,
+          refresh_token: data.refresh_token,
+          mqtt: data.mqtt,
+        });
+      } else {
+        Alert.alert('Verification Failed', data.error || 'Invalid OTP');
+      }
+    } catch (error) {
+      Alert.alert('Network Error', 'Could not verify code.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResendOtp = async (): Promise<void> => {
+    try {
+      const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}/api/auth/resend-otp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: pendingVerificationEmail }),
+      });
+      const data = await response.json();
+      if (response.ok) {
+        Alert.alert('Code Sent', 'A new verification code has been sent to your email.');
+      } else {
+        Alert.alert('Error', data.error || 'Failed to resend code.');
+      }
+    } catch (err) {
+      Alert.alert('Network Error', 'Could not resend code.');
+    }
+  };
+
+  // If user is pending verification, render the OTP screen view
+  if (pendingVerificationEmail) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.brandTitle}>KRONOS</Text>
+        <Text style={styles.title}>Verify Your Email</Text>
+        <Text style={styles.subtitle}>Enter the 6-digit code sent to {pendingVerificationEmail}</Text>
+
+        <View style={styles.form}>
+          <TextInput
+            style={[styles.input, { textAlign: 'center', fontSize: 22, letterSpacing: 6 }]}
+            placeholder="123456"
+            placeholderTextColor="#64748b"
+            value={otpCode}
+            onChangeText={setOtpCode}
+            keyboardType="number-pad"
+            maxLength={6}
+            editable={!loading}
+          />
+
+          <TouchableOpacity style={styles.button} onPress={handleVerifyOtp} disabled={loading}>
+            {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Verify Code</Text>}
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.toggleButton} onPress={handleResendOtp} disabled={loading}>
+            <Text style={styles.toggleButtonText}>Didn't receive a code? Resend</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={[styles.toggleButton, { marginTop: 10 }]} onPress={() => setPendingVerificationEmail(null)}>
+            <Text style={[styles.toggleButtonText, { color: '#94a3b8' }]}>Back to Login</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
