@@ -1,7 +1,7 @@
 # ==========================================
 # Stage 1: Build / Compile TypeScript
 # ==========================================
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -17,13 +17,13 @@ RUN npm install -g typescript
 COPY tsconfig.json ./
 COPY src/ ./src/
 
-# Compile TypeScript code (this generates your /dist folder)
+# Compile TypeScript code (this generates /dist folder)
 RUN npm run build
 
 # ==========================================
 # Stage 2: Production Runtime Image
 # ==========================================
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 
 WORKDIR /app
 
@@ -39,5 +39,5 @@ RUN npm ci --only=production && npm cache clean --force
 COPY --chown=nodejs:nodejs --from=builder /app/dist ./dist
 USER nodejs
 
-# Point to your compiled JavaScript output file
+# Point to compiled JavaScript output file
 CMD ["node", "dist/server.js"]

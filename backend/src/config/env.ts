@@ -21,7 +21,13 @@ const envSchema = z.object({
     DIGITAL_OCEAN_SPACES_ACCESS_KEY_SECRET: z.string(),
     HEADSCALE_SUBDOMAIN: z.url(),
     HEADSCALE_API_KEY: z.string(),
-    HEADSCALE_API_URL: z.url()
+    HEADSCALE_API_URL: z.url(),
+	SMTP_HOST: z.string(),
+	SMTP_PORT: z.coerce.number(),
+	SMTP_USER: z.string(),
+	SMTP_PASSWORD: z.string(),
+	SMTP_FROM_EMAIL: z.string(),
+	BREVO_API_KEY: z.string()
 });
 
 const parsedEnv = envSchema.safeParse({
@@ -44,7 +50,13 @@ const parsedEnv = envSchema.safeParse({
     DIGITAL_OCEAN_SPACES_ACCESS_KEY_SECRET: process.env.DIGITAL_OCEAN_SPACES_ACCESS_KEY_SECRET,
     HEADSCALE_SUBDOMAIN: process.env.HEADSCALE_SUBDOMAIN,
     HEADSCALE_API_KEY: process.env.HEADSCALE_API_KEY,
-    HEADSCALE_API_URL: process.env.HEADSCALE_API_URL
+    HEADSCALE_API_URL: process.env.HEADSCALE_API_URL,
+	SMTP_HOST: process.env.SMTP_HOST,
+	SMTP_PORT: process.env.SMTP_PORT,
+	SMTP_USER: process.env.SMTP_USER,
+	SMTP_PASSWORD: process.env.SMTP_PASSWORD,
+	SMTP_FROM_EMAIL: process.env.SMTP_FROM_EMAIL,
+	BREVO_API_KEY: process.env.BREVO_API_KEY
 })
 
 if (!parsedEnv.success) {

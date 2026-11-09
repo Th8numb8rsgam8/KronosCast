@@ -5,13 +5,13 @@ import { PoolClient, DatabaseError } from "pg";
 import mqttAdminClient, { deriveDeterministicMqttPassword } from "../services/mqtt.service";
 // import jsrsasign from 'jsrsasign';
 import bcrypt from 'bcrypt';
-import crypto from 'crypto';
-import axios from 'axios';
+// import axios from 'axios';
 import { createUserAccountDeleteHandler } from "../controllers/auth.controller";
 import { verifyJwtMiddleware } from "../middleware/auth.middleware";
 import { generateAccessToken, generateRefreshToken } from '../controllers/auth.controller';
 import { provisionMqttUserInMosquitto, provisionEdgeDeviceInMosquitto, buildMqttResponseObject } from "../services/mqtt.service";
 import { createHeadscaleUser, generateHeadscalePreauthKey} from "../services/headscale.service";
+import { sendVerificationEmail } from "../services/email.service";
 import { SignupRequestBody, LoginRequestBody, UserPayload, UserRow } from "../types/user.types";
 import { DeviceRow, SetupJwtPayload, VerifySetupRequestBody } from "../types/device.types";
 // import { CFSSLSignedResponse } from '../types/mqtt.types'
@@ -59,15 +59,27 @@ router.post(
       // 2. Hash Password & Insert User
       const passwordHash = await bcrypt.hash(password, 10);
 
+      // Generate 6-digit OTP code & hash it
+      const rawOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      const otpHash = await bcrypt.hash(rawOtp, 10);
+      const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes expiry
+
       // Insert new user into database
       const userResult = await client.query<{ id: string; username: string; email: string }>(
-        'INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3) RETURNING id, username, email',
-        [username.trim(), email.toLowerCase().trim(), passwordHash]
+        `INSERT INTO users (username, email, password_hash, is_verified, email_otp_hash, email_otp_expires_at) 
+         VALUES ($1, $2, $3, FALSE, $4, $5) 
+         RETURNING id, username, email`,
+        [username.trim(), email.toLowerCase().trim(), passwordHash, otpHash, otpExpiresAt]
       );
 
       const newUser = userResult.rows[0];
 
-      // const rawMqttPassword = crypto.randomBytes(18).toString('hex');
+      // Send verification email via Brevo SMTP
+      console.log("SENDING VERIFICATION EMAIL");
+      await sendVerificationEmail(newUser.email, rawOtp);
+      console.log("SENT VERIFICATION EMAIL");
+      await client.query('COMMIT');
+
 	  const rawMqttPassword = deriveDeterministicMqttPassword(newUser.id);
       const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
 
@@ -90,17 +102,23 @@ router.post(
 
       // Issue JWT authentication token for API access
       // const token = jwt.sign({ userId: newUser.id, email: newUser.email }, JWT_SECRET, { expiresIn: '7d' });
-      const user = { id: newUser.id, username: newUser.username} as UserPayload;
-      const accessToken = generateAccessToken(user);
-      const refreshToken = generateRefreshToken(user);
+      // const user = { id: newUser.id, username: newUser.username} as UserPayload;
+      // const accessToken = generateAccessToken(user);
+      // const refreshToken = generateRefreshToken(user);
 
       return res.status(201).json({
-        message: 'Signup successful',
-        user: newUser,
-        access_token: accessToken,
-        refresh_token: refreshToken,
-        mqtt: buildMqttResponseObject(newUser.id, mqttUsername, rawMqttPassword)
+        success: true,
+        requiresVerification: true,
+        email: newUser.email,
+        message: 'Account created. Please check your email for the verification code.',
       });
+      // return res.status(201).json({
+      //  message: 'Signup successful',
+      //  user: newUser,
+      //  access_token: accessToken,
+      //  refresh_token: refreshToken,
+      //  mqtt: buildMqttResponseObject(newUser.id, mqttUsername, rawMqttPassword)
+      // });
     } catch (err: unknown) {
       await client.query('ROLLBACK');
 
@@ -113,6 +131,139 @@ router.post(
       return res.status(500).json({ error: 'Internal server error during signup.' });
     } finally {
       client.release();
+    }
+  }
+);
+
+// ============================================================================
+// VERIFY OTP ENDPOINT
+// ============================================================================
+router.post(
+  '/verify-otp',
+  async (req: Request, res: Response): Promise<Response> => {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({ error: 'Email and OTP code are required.' });
+    }
+
+    const client: PoolClient = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const result = await client.query<UserRow>(
+        'SELECT id, username, email, email_otp_hash, email_otp_expires_at, is_verified FROM users WHERE email = $1',
+        [email.toLowerCase().trim()]
+      );
+
+      if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'User not found.' });
+      }
+
+      const user = result.rows[0];
+
+      if (user.is_verified) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Account is already verified.' });
+      }
+
+      if (!user.email_otp_hash || !user.email_otp_expires_at || new Date() > new Date(user.email_otp_expires_at)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Verification code has expired. Please request a new one.' });
+      }
+
+      const isOtpValid = await bcrypt.compare(otp, user.email_otp_hash);
+      if (!isOtpValid) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Invalid verification code.' });
+      }
+
+      // Provision MQTT & Headscale accounts upon successful verification
+      const rawMqttPassword = deriveDeterministicMqttPassword(user.id);
+      const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
+      const mqttUsername = await provisionMqttUserInMosquitto(user.id, rawMqttPassword);
+
+      const createdHeadscaleUser: boolean = await createHeadscaleUser(user.id);
+      if (!createdHeadscaleUser) {
+        await client.query('ROLLBACK');
+        return res.status(502).json({ error: 'Failed to add new user to Headscale private network.' });
+      }
+
+      await client.query(
+        `UPDATE users 
+         SET is_verified = TRUE, 
+             email_otp_hash = NULL, 
+             email_otp_expires_at = NULL, 
+             mqtt_username = $1, 
+             mqtt_password_hash = $2 
+         WHERE id = $3`,
+        [mqttUsername, mqttPasswordHash, user.id]
+      );
+
+      await client.query('COMMIT');
+
+      const returningUser = { id: user.id, username: user.username } as UserPayload;
+      const accessToken = generateAccessToken(returningUser);
+      const refreshToken = generateRefreshToken(returningUser);
+
+      return res.status(200).json({
+        success: true,
+        message: 'Email verified successfully!',
+        user: { id: user.id, username: user.username, email: user.email },
+        access_token: accessToken,
+        refresh_token: refreshToken,
+        mqtt: buildMqttResponseObject(user.id, mqttUsername, rawMqttPassword),
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('Verify OTP Error:', err);
+      return res.status(500).json({ error: 'Internal server error during verification.' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ============================================================================
+// RESEND OTP ENDPOINT
+// ============================================================================
+router.post(
+  '/resend-otp',
+  async (req: Request, res: Response): Promise<Response> => {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required.' });
+    }
+
+    try {
+      const result = await pool.query('SELECT id, is_verified FROM users WHERE email = $1', [email.toLowerCase().trim()]);
+
+      if (result.rows.length === 0 || result.rows[0].is_verified) {
+        return res.status(400).json({ error: 'Invalid request.' });
+      }
+
+      const user = result.rows[0];
+      const rawOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      const otpHash = await bcrypt.hash(rawOtp, 10);
+      const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+      await pool.query(
+        'UPDATE users SET email_otp_hash = $1, email_otp_expires_at = $2 WHERE id = $3',
+        [otpHash, otpExpiresAt, user.id]
+      );
+
+      // Send new code via Brevo SMTP
+      console.log("SENDING VERIFICATION");
+      await sendVerificationEmail(email, rawOtp);
+      console.log("SENT VERIFICATION");
+
+      return res.status(200).json({ success: true, message: 'New verification code sent.' });
+    } catch (err) {
+      console.error('Resend OTP Error:', err);
+      return res.status(500).json({ error: 'Failed to resend verification code.' });
     }
   }
 );
@@ -132,7 +283,7 @@ router.post(
     try {
       // Fetch user record including MQTT fields
       const result = await pool.query<UserRow>(
-        'SELECT id, username, email, password_hash, mqtt_username, mqtt_password_hash FROM users WHERE email = $1',
+        'SELECT id, username, email, password_hash, mqtt_username, mqtt_password_hash, is_verified FROM users WHERE email = $1',
         [email.toLowerCase().trim()]
       );
 
@@ -142,6 +293,14 @@ router.post(
 
       const user = result.rows[0];
 
+      if (!user.is_verified) {
+        return res.status(403).json({ 
+          error: 'Please verify your email address before logging in.',
+          requiresVerification: true,
+          email: user.email
+        });
+      }
+
       // Validate password
       const passwordMatch = await bcrypt.compare(password, user.password_hash);
       if (!passwordMatch) {
@@ -149,13 +308,11 @@ router.post(
       }
 
       let mqttUsername = user.mqtt_username;
-
 	  const rawMqttPassword = deriveDeterministicMqttPassword(user.id);
 
 	  // ONLY provision if the user predates MQTT setup
 	  // Do NOT rotate passwords on regular logins to keep multi-device session stable
       if (!mqttUsername || !user.mqtt_password_hash) {
-        // rawMqttPassword = crypto.randomBytes(18).toString('hex');
         const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
         mqttUsername = await provisionMqttUserInMosquitto(user.id, rawMqttPassword);
 
@@ -206,8 +363,7 @@ router.post(
     const backendUrl = `${protocol}://${host}/api/auth/devices/verify-setup`;
 
     try {
-
-      // 3. Create a stateless signed JWT token expiring in 15 minutes
+      // Create a stateless signed JWT token expiring in 15 minutes
       const signOptions: SignOptions = { expiresIn: '15m' };
       const setupToken = jwt.sign(
         { 

@@ -8,6 +8,10 @@ export interface UserRow {
   mqtt_username: string | null;
   mqtt_password_hash: string | null;
   created_at: Date;
+
+  is_verified: boolean;
+  email_otp_hash: string | null;
+  email_otp_expires_at: Date | null;
 }
 
 export interface UserPayload extends JwtPayload {

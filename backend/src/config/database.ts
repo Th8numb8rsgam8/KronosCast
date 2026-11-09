@@ -21,6 +21,9 @@ export async function initDb(): Promise<void> {
           password_hash VARCHAR(255) NOT NULL,
           mqtt_username VARCHAR(100) UNIQUE,
           mqtt_password_hash VARCHAR(255),
+	  is_verified BOOLEAN DEFAULT FALSE,
+	  email_otp_hash VARCHAR(255),
+	  email_otp_expires_at TIMESTAMP,
           created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
 
