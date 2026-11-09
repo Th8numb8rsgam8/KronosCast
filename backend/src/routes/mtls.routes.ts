@@ -8,34 +8,45 @@ const router = Router();
 
 router.post('/api/v1/devices/mqtt-request', async (req: Request, res: Response): Promise<Response> => {
     // Access the verified client certificate via the underlying socket wrapper
-    const socket = req.socket as any; 
-    const clientCert = socket.getPeerCertificate();
-    
-    if (!clientCert || !clientCert.subject) {
-        return res.status(401).json({ error: "Client certificate missing from handshake context" });
-    }
-    
-    const device_username: string = clientCert.subject.CN;
-    const deviceId: string = device_username.replace(/^device_/, '');
-    const client = await pool.connect();
-    const deviceQuery = `
-      SELECT hardware_id, user_id
-      FROM devices
-      WHERE id = $1;
-    `;
-    const deviceResult = await client.query(deviceQuery, [deviceId]);
 
-    if (deviceResult.rows.length === 0) {
-      client.release();
-      res.status(404).json({ error: 'Device not found or does not belong to any user.' });
-    }
+    // const socket = req.socket as any; 
+    // const clientCert = socket.getPeerCertificate();
+    
+    // if (!clientCert || !clientCert.subject) {
+        // return res.status(401).json({ error: "Client certificate missing from handshake context" });
+    // }
+    
+    // const device_username: string = clientCert.subject.CN;
+    // const deviceId: string = device_username.replace(/^device_/, '');
+	
+	const { hardware_id } = req.body;
+
+	if (!hardware_id) {
+    	return res.status(400).json({ 
+      		error: 'Bad Request: Missing hardware ID from device.' 
+    	});
+	}
+	
+    const client = await pool.connect();
+    // const deviceQuery = `
+    //  SELECT hardware_id, user_id
+    //  FROM devices
+    //  WHERE id = $1;
+    // `;
+    // const deviceResult = await client.query(deviceQuery, [deviceId]);
+
+    // if (deviceResult.rows.length === 0) {
+    //  client.release();
+    //  res.status(404).json({ error: 'Device not found or does not belong to any user.' });
+    // }
 
     const whitelistCheck = `
       SELECT status 
       FROM device_whitelist
       WHERE hardware_id = $1
     `;
-    const whitelistResult = await client.query(whitelistCheck, [deviceResult.rows[0].hardware_id]);
+    // const whitelistResult = await client.query(whitelistCheck, [deviceResult.rows[0].hardware_id]);
+    const whitelistResult = await client.query(whitelistCheck, [hardware_id]);
 
     if (whitelistResult.rows.length === 0) {
       await client.release();
@@ -47,11 +58,24 @@ router.post('/api/v1/devices/mqtt-request', async (req: Request, res: Response):
       return res.status(400).json({ error: 'Hardware is not listed as active' });
     }
 
-    const topics = getDeviceMqttTopics(deviceResult.rows[0].user_id, deviceId);
+    const deviceQuery = `
+    	SELECT id, user_id
+    	FROM devices
+    	WHERE hardware_id = $1;
+   	`;
+    const deviceResult = await client.query(deviceQuery, [hardware_id]);
+
+    if (deviceResult.rows.length === 0) {
+    	client.release();
+    	res.status(404).json({ error: 'Device not found or does not belong to any user.' });
+    }
+
+    const topics = getDeviceMqttTopics(deviceResult.rows[0].user_id, deviceResult.rows[0].id);
     return res.status(200).json({
       message: 'Provisioning MQTT topics for device.',
       mqtt: {
-        brokerUrl: ENV.MQTT_DEVICE_URL,
+        // brokerUrl: ENV.MQTT_DEVICE_URL,
+        brokerUrl: ENV.MQTT_BROKER_URL,
         topics: {
           telemetry: topics.telemetry,
           status: topics.status,

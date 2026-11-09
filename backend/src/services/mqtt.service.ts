@@ -1,4 +1,4 @@
-
+import crypto from 'crypto';
 import mqtt from 'mqtt';
 import { ENV } from '../config/env';
 
@@ -19,6 +19,10 @@ mqttAdminClient.on('error', (err: Error) => {
   console.error('Mosquitto Admin Connection Error:', err.message);
 });
 
+export function deriveDeterministicMqttPassword(userId: string): string {
+	const pepper = ENV.MQTT_PASSWORD_PEPPER;
+	return crypto.createHmac('sha256', pepper).update(`user_${userId}`).digest('hex');
+}
 
 export function getDeviceMqttTopics(userId: string, deviceId: string) {
   return {

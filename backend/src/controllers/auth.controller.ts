@@ -2,86 +2,9 @@ import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { Pool } from 'pg';
 import mqtt from 'mqtt';
+import { deleteHeadscaleUser, deleteHeadscaleNodeByHostname } from '../services/headscale.service';
+import { deleteAllUserVideosFromSpaces } from '../controllers/video.controller';
 import { ENV } from '../config/env';
-import { PreAuthKeyResponse } from '../types/device.types';
-
-export const createHeadscaleUser = async (username: string): Promise<boolean> => {
-	try {
-		const response = await fetch(`${ENV.HEADSCALE_API_URL}/api/v1/user`, {
-			method: 'POST',
-			headers: {
-				'Authorization': `Bearer ${ENV.HEADSCALE_API_KEY}`,
-				'Content-Type': 'application/json'
-			},
-			body: JSON.stringify({ name: username })
-		});
-
-		if (!response.ok) {
-			const errorText = await response.text();
-			if (response.status === 409 || errorText.includes('already exists')) {
-				console.warn(`User ${username} already exists on Headscale.`);
-				return true;
-			}
-			throw new Error(`Failed to create user: ${response.status} - ${errorText}`);
-		}
-
-		console.log(`Successfully created Headscale user: ${username}`);
-		return true;
-	} catch (error) {
-		console.error('Error in createUser:', error);
-		throw error;
-	}
-}
-
-export const generateHeadscalePreauthKey = async (username: string, tag: string): Promise<string> => {
-
-	const headscaleUsers = await fetch(`${ENV.HEADSCALE_API_URL}/api/v1/user`, {
-		method: 'GET',
-		headers: {
-			'Authorization': `Bearer ${ENV.HEADSCALE_API_KEY}`,
-			'Content-Type': 'application/json'
-		}
-	});
-
-	if (!headscaleUsers.ok) {
-		throw new Error(`Failed to fetch Headscale users list: ${headscaleUsers.status}`);
-	}
-	const userData = (await headscaleUsers.json()) as { users: Array<{ id: number; name: string }> };
-	const matchedUser = userData.users.find((u) => u.name === username);
-
-	if (!matchedUser) {
-		throw new Error(`Could not find numerid ID for Headscale user: ${username}`);
-	}
-
-	const response = await fetch(`${ENV.HEADSCALE_API_URL}/api/v1/preauthkey`, {
-		method: 'POST',
-		headers: {
-			'Authorization': `Bearer ${ENV.HEADSCALE_API_KEY}`,
-			'Content-Type': 'application/json'
-		},
-		body: JSON.stringify({
-			user: matchedUser.id.toString(),
-			reusable: false,
-			ephemeral: false,
-			expiration: new Date(Date.now() + 30 * 50 * 1000).toISOString(),
-			aclTags: [tag],
-		}),
-	});
-
-	if (!response.ok) {
-		const errorBody = await response.text();
-		throw new Error(`Headscale API error (${response.status}): ${errorBody}`);
-	}
-
-	const data = (await response.json()) as PreAuthKeyResponse;
-
-	const key = data.preAuthKey?.key || data.key;
-	if (!key) {
-		throw new Error('Malformed response received from Headscale API: missing key.');
-	}
-
-	return key;
-}
 
 // Generate short-lived Access Token (15 mins)
 export const generateAccessToken = (user: { id: string; username: string }): string => {
@@ -114,6 +37,9 @@ export const createUserAccountDeleteHandler = (pool: Pool, mqttAdminClient: mqtt
     const client = await pool.connect();
 
     try {
+
+		await deleteAllUserVideosFromSpaces(userId);
+
       // 1. Fetch user info and all associated devices to clean up MQTT & Whitelists properly
       const userQuery = `SELECT mqtt_username FROM users WHERE id = $1;`;
       const userResult = await client.query(userQuery, [userId]);
@@ -125,9 +51,22 @@ export const createUserAccountDeleteHandler = (pool: Pool, mqttAdminClient: mqtt
 
       const userMqttUsername = userResult.rows[0].mqtt_username;
 
-      const devicesQuery = `SELECT id, hardware_id, mqtt_username FROM devices WHERE user_id = $1;`;
+      const devicesQuery = `SELECT id, hardware_id FROM devices WHERE user_id = $1;`;
       const devicesResult = await client.query(devicesQuery, [userId]);
       const devices = devicesResult.rows;
+
+	  // Remove user's devices from Headscale private network
+	  for (const device of devices) {
+		  const removedNodeFromHeadscale = await deleteHeadscaleNodeByHostname(device.hardware_id);
+		  if (!removedNodeFromHeadscale) {
+			  console.log(`Failed to delete Node from Headscale of device ${device.hardware_id}`);
+		  }
+	  }
+
+	  const removedUserFromHeadscale = await deleteHeadscaleUser(userId);
+	  if (!removedUserFromHeadscale) {
+		console.log(`Failed to delete User from Headscale: ${userId}`);
+	  }
 
       // Start database transaction
       await client.query('BEGIN');

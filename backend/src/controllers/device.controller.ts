@@ -1,9 +1,9 @@
 import { Request, Response } from "express";
 import { Pool } from "pg";
-import mqtt from "mqtt";
+// import mqtt from "mqtt";
+import { deleteHeadscaleNodeByHostname } from '../services/headscale.service';
 
-
-export const createDeviceDeleteHandler = (pool: Pool, mqttAdminClient: mqtt.MqttClient) => {
+export const createDeviceDeleteHandler = (pool: Pool) => {
   return async (req: Request, res: Response): Promise<void> => {
     const { userId, deviceId } = req.params;
 
@@ -18,7 +18,7 @@ export const createDeviceDeleteHandler = (pool: Pool, mqttAdminClient: mqtt.Mqtt
     try {
       // 1. Fetch the device first to get its hardware_id and mqtt_username
       const deviceQuery = `
-        SELECT hardware_id, mqtt_username 
+        SELECT hardware_id
         FROM devices 
         WHERE id = $1 AND user_id = $2;
       `;
@@ -26,11 +26,17 @@ export const createDeviceDeleteHandler = (pool: Pool, mqttAdminClient: mqtt.Mqtt
 
       if (deviceResult.rows.length === 0) {
         res.status(404).json({ error: 'Device not found or does not belong to this user.' });
-        return;
       }
 
-      const { hardware_id: hardwareId, mqtt_username: mqttUsername } = deviceResult.rows[0];
-      const roleName = `role_device_${deviceId}`;
+      // const { hardware_id: hardwareId, mqtt_username: mqttUsername } = deviceResult.rows[0];
+      const { hardware_id: hardwareId } = deviceResult.rows[0];
+
+	  const deviceRemovedFromHeadscale = deleteHeadscaleNodeByHostname(hardwareId);
+	  if (!deviceRemovedFromHeadscale) {
+		  console.log(`Failed to delete device from Headscale private network: ${hardwareId}`);
+	  }
+
+      // const roleName = `role_device_${deviceId}`;
 
       // Start database transaction
       await client.query('BEGIN');
@@ -56,35 +62,35 @@ export const createDeviceDeleteHandler = (pool: Pool, mqttAdminClient: mqtt.Mqtt
       // Commit the database transaction first
       await client.query('COMMIT');
 
-      // 4. Remove MQTT credentials from Mosquitto Dynamic Security
+      // Remove MQTT credentials from Mosquitto Dynamic Security
       // Mosquitto dynamic security commands: deleteClient and deleteRole
-      if (mqttUsername) {
-        const deleteClientCmd = {
-          commands: [
-            {
-              command: 'deleteClient',
-              username: mqttUsername,
-            }
-          ]
-        };
+      // if (mqttUsername) {
+      //  const deleteClientCmd = {
+      //    commands: [
+      //      {
+      //        command: 'deleteClient',
+      //        username: mqttUsername,
+      //      }
+      //    ]
+      //  };
 
-        const deleteRoleCmd = {
-          commands: [
-            {
-              command: 'deleteRole',
-              rolename: roleName,
-            }
-          ]
-        };
+        // const deleteRoleCmd = {
+        //  commands: [
+        //    {
+        //      command: 'deleteRole',
+        //      rolename: roleName,
+        //    }
+        //  ]
+        // };
 
         // Publish deletion commands to Mosquitto control topic
-        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(deleteClientCmd));
-        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(deleteRoleCmd));
-      }
+        // mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(deleteClientCmd));
+        // mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(deleteRoleCmd));
+      // }
 
       res.status(200).json({ 
         success: true, 
-        message: 'Device successfully deleted, whitelist reset, and MQTT credentials revoked.' 
+        message: 'Device successfully deleted.' 
       });
 
     } catch (error) {

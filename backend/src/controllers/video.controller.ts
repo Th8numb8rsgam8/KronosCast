@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { GetObjectCommand, ListObjectsV2Command,} from '@aws-sdk/client-s3';
+import { GetObjectCommand, ListObjectsV2Command, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Pool } from 'pg';
 import { ENV } from '../config/env';
@@ -53,3 +53,50 @@ export const createPlaylistJsonHandler = (pool: Pool) => {
     }
   };
 };
+
+/**
+ * Deletes all files stored under a specific user's folder prefix in DigitalOcean Spaces.
+ * @param userId The ID of the user whose account is being deleted
+ */
+export async function deleteAllUserVideosFromSpaces(userId: string): Promise<void> {
+  const bucketName = ENV.DIGITAL_OCEAN_SPACES_BUCKET_NAME;
+  const prefix = `${userId}/`;
+
+  try {
+    // 1. List all objects matching the user's prefix
+    const listCommand = new ListObjectsV2Command({
+      Bucket: bucketName,
+      Prefix: prefix,
+    });
+
+    const listedObjects = await spacesClient.send(listCommand);
+
+    // If the user has no videos stored, there's nothing to delete
+    if (!listedObjects.Contents || listedObjects.Contents.length === 0) {
+      return;
+    }
+
+    // 2. Map the results into an array of objects required by DeleteObjectsCommand
+    const objectsToDelete = listedObjects.Contents
+      .filter((item) => item.Key) // Ensure key exists
+      .map((item) => ({ Key: item.Key as string }));
+
+    if (objectsToDelete.length === 0) return;
+
+    // 3. Batch delete the objects (S3/Spaces allows up to 1000 objects per delete request)
+    const deleteCommand = new DeleteObjectsCommand({
+      Bucket: bucketName,
+      Delete: {
+        Objects: objectsToDelete,
+        Quiet: true, // Optional: suppresses successful deletion logs in response
+      },
+    });
+
+    await spacesClient.send(deleteCommand);
+    console.log(`Successfully deleted ${objectsToDelete.length} video file(s) for user: ${userId}`);
+
+  } catch (error) {
+    console.error(`[Spaces Bulk Delete Error] Failed to delete files for user ${userId}:`, error);
+    throw new Error('Failed to clean up user media files from cloud storage.');
+  }
+}

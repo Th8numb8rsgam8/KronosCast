@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { pool } from "../config/database";
-import mqttAdminClient from "../services/mqtt.service";
+// import mqttAdminClient from "../services/mqtt.service";
 import { verifyJwtMiddleware } from "../middleware/auth.middleware";
 import { createDeviceDeleteHandler } from "../controllers/device.controller";
 import { DeviceRow } from "../types/device.types";
@@ -10,7 +10,7 @@ const router  = Router();
 router.delete(
   '/:userId/:deviceId', 
   verifyJwtMiddleware(),
-  createDeviceDeleteHandler(pool, mqttAdminClient)
+  createDeviceDeleteHandler(pool)
 );
 
 // Get all devices owned by a user

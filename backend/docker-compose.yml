@@ -21,27 +21,27 @@ services:
       chmod 664 /mosquitto/config/dynamic-security.json;
       "
 
-  cfssl:
-    image: cfssl/cfssl:v1.7.1
-    container_name: cfssl_ca
-    entrypoint: >
-      /bin/sh -c "
-        if [ ! -f /etc/cfssl/ca-key.pem ]; then
-          echo 'Initializing fresh production Certificate Authority...';
-          cfssl gencert -initca /etc/cfssl/ca-csr.json | cfssljson -bare /etc/cfssl/ca;
-          cp /etc/cfssl/ca.pem /etc/cfssl-public/ca.pem;
-        fi;
-        echo 'Starting CFSSL Signing Server...';
-        cfssl serve -address=0.0.0.0 -port=8888 -ca=/etc/cfssl/ca.pem -ca-key=/etc/cfssl/ca-key.pem -config=/etc/cfssl/ca-config.json
-      "
-    networks:
-      - iot_production_network
-    # ports:
-    #   - "8888:8888"
-    volumes:
-      - ./cfssl/cfssl-config:/etc/cfssl
-      - ./cfssl/cfssl-public:/etc/cfssl-public
-    restart: unless-stopped
+  # cfssl:
+  #   image: cfssl/cfssl:v1.7.1
+  #   container_name: cfssl_ca
+  #   entrypoint: >
+  #     /bin/sh -c "
+  #       if [ ! -f /etc/cfssl/ca-key.pem ]; then
+  #         echo 'Initializing fresh production Certificate Authority...';
+  #         cfssl gencert -initca /etc/cfssl/ca-csr.json | cfssljson -bare /etc/cfssl/ca;
+  #         cp /etc/cfssl/ca.pem /etc/cfssl-public/ca.pem;
+  #       fi;
+  #       echo 'Starting CFSSL Signing Server...';
+  #       cfssl serve -address=0.0.0.0 -port=8888 -ca=/etc/cfssl/ca.pem -ca-key=/etc/cfssl/ca-key.pem -config=/etc/cfssl/ca-config.json
+  #     "
+  #   networks:
+  #     - iot_production_network
+  #   # ports:
+  #   #   - "8888:8888"
+  #   volumes:
+  #     - ./cfssl/cfssl-config:/etc/cfssl
+  #     - ./cfssl/cfssl-public:/etc/cfssl-public
+  #   restart: unless-stopped
 
   certbot-init:
     image: certbot/certbot:nightly
@@ -96,7 +96,6 @@ services:
 
   headscale:
     image: headscale/headscale:main-5651bf4
-    # image: headscale/headscale:latest
     container_name: headscale
     restart: unless-stopped
     command: serve
@@ -109,15 +108,59 @@ services:
     networks:
       - iot_production_network
 
-  tailscale:
+  node-tailscale: 
     image: tailscale/tailscale:latest
-    container_name: tailscale_node
+    container_name: node_tailscale
+    restart: unless-stopped
+    environment:
+      - TS_HOSTNAME=${HEADSCALE_NODE_HOSTNAME}
+      - TS_AUTHKEY=${HEADSCALE_NODE_PREAUTH_KEY}
+      - TS_EXTRA_ARGS=--login-server=${HEADSCALE_SUBDOMAIN}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=0
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    volumes:
+      - node-ts-state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    network_mode: "container:node_backend"
+    depends_on:
+      - node_app
+      - headscale
+      - api-gateway
+
+  mosquitto-tailscale: 
+    image: tailscale/tailscale:latest
+    container_name: mosquitto_tailscale
+    restart: unless-stopped
+    environment:
+      - TS_HOSTNAME=${HEADSCALE_MOSQUITTO_HOSTNAME}
+      - TS_AUTHKEY=${HEADSCALE_MOSQUITTO_PREAUTH_KEY}
+      - TS_EXTRA_ARGS=--login-server=${HEADSCALE_SUBDOMAIN}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=0
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    volumes:
+      - mosquitto-ts-state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    network_mode: "container:mosquitto_broker"
+    depends_on:
+      - mosquitto
+      - headscale
+      - api-gateway
+
+  admin-tailscale:
+    image: tailscale/tailscale:latest
+    container_name: admin_tailscale
     restart: unless-stopped
     hostname: droplet-gateway
     network_mode: host
     environment:
       - TS_AUTHKEY=${HEADSCALE_ADMIN_PREAUTH_KEY}
-      - TS_EXTRA_ARGS=--login-server=https://edge.kronoscast.com
+      - TS_EXTRA_ARGS=--login-server=${HEADSCALE_SUBDOMAIN}
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_USERSPACE=0
     cap_add:
@@ -151,12 +194,16 @@ services:
     depends_on:
       init-dynsec:
         condition: service_completed_successfully
-      cfssl:
-        condition: service_started
-    ports:
-      - "1883:1883"   # Standard MQTT Port for NodeJS Admin User
-      - "8883:8883"   # MQTTS over mTLS (Edge Devices)
-      - "9001:9001"   # Websockets Connection for Mobile App
+      init-mosquitto:
+        condition: service_completed_successfully
+      certbot-init:
+        condition: service_completed_successfully
+      # cfssl:
+      #   condition: service_started
+    # ports:
+      # - "1883:1883"   # Standard MQTT Port for NodeJS Admin User
+      # - "8883:8883"   # MQTTS over mTLS (Edge Devices)
+      # - "9001:9001"   # Websockets Connection for Mobile App
     networks:
       - iot_production_network
     volumes:
@@ -167,7 +214,7 @@ services:
       # - ./certbot-certs/server.crt:/mosquitto/config/certs/server.crt:ro
       # - ./certbot-certs/server.key:/mosquitto/config/certs/server.key:ro
       - certbot-etc:/etc/letsencrypt:ro
-      - ./cfssl/cfssl-public:/mosquitto/config/certs/ca_authority:ro
+      # - ./cfssl/cfssl-public:/mosquitto/config/certs/ca_authority:ro
     restart: unless-stopped
 
   node_app:
@@ -176,9 +223,9 @@ services:
       dockerfile: Dockerfile
     container_name: node_backend
     restart: unless-stopped
-    ports:
+    # ports:
       # - "80:80"
-      - "8443:8443"
+      # - "8443:8443"
     env_file:
       - .env
     environment:
@@ -186,14 +233,14 @@ services:
     networks:
       - iot_production_network
     volumes:
-      - ./cfssl/cfssl-public:/app/cfssl-config:ro
+      # - ./cfssl/cfssl-public:/app/cfssl-config:ro
       # - ./certbot-certs/server.crt:/certs/server.crt:ro
       # - ./certbot-certs/server.key:/certs/server.key:ro
       - certbot-etc:/etc/letsencrypt:ro
       - ./public_key.pem:/app/public_key.pem
     depends_on:
-      cfssl:
-        condition: service_started
+      # cfssl:
+      #   condition: service_started
       postgres:
         condition: service_started
       certbot-init:
@@ -221,9 +268,11 @@ networks:
 volumes:
   certbot-etc:    # Shared public server certificates
   certbot-var:    # Shared webroot validation challenge path
-  cfssl-certs:    # Shared private root CA file (ca.pem)
+  # cfssl-certs:    # Shared private root CA file (ca.pem)
   postgres-data:
   mosquitto-data:
   mosquitto-log:
   headscale-data:
   tailscale-data:
+  node-ts-state:
+  mosquitto-ts-state:

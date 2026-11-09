@@ -2,18 +2,19 @@ import { Router, Request, Response } from "express";
 import jwt, { SignOptions } from 'jsonwebtoken';
 import { pool } from "../config/database";
 import { PoolClient, DatabaseError } from "pg";
-import mqttAdminClient from "../services/mqtt.service";
-import jsrsasign from 'jsrsasign';
+import mqttAdminClient, { deriveDeterministicMqttPassword } from "../services/mqtt.service";
+// import jsrsasign from 'jsrsasign';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import axios from 'axios';
 import { createUserAccountDeleteHandler } from "../controllers/auth.controller";
 import { verifyJwtMiddleware } from "../middleware/auth.middleware";
-import { generateAccessToken, generateRefreshToken, generateHeadscalePreauthKey, createHeadscaleUser } from '../controllers/auth.controller';
+import { generateAccessToken, generateRefreshToken } from '../controllers/auth.controller';
 import { provisionMqttUserInMosquitto, provisionEdgeDeviceInMosquitto, buildMqttResponseObject } from "../services/mqtt.service";
+import { createHeadscaleUser, generateHeadscalePreauthKey} from "../services/headscale.service";
 import { SignupRequestBody, LoginRequestBody, UserPayload, UserRow } from "../types/user.types";
 import { DeviceRow, SetupJwtPayload, VerifySetupRequestBody } from "../types/device.types";
-import { CFSSLSignedResponse } from '../types/mqtt.types'
+// import { CFSSLSignedResponse } from '../types/mqtt.types'
 import { ENV } from "../config/env";
 
 // Regex Patterns
@@ -66,7 +67,8 @@ router.post(
 
       const newUser = userResult.rows[0];
 
-      const rawMqttPassword = crypto.randomBytes(18).toString('hex');
+      // const rawMqttPassword = crypto.randomBytes(18).toString('hex');
+	  const rawMqttPassword = deriveDeterministicMqttPassword(newUser.id);
       const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
 
       const mqttUsername = await provisionMqttUserInMosquitto(newUser.id, rawMqttPassword);
@@ -78,6 +80,11 @@ router.post(
       );
 
 	  const createdHeadscaleUser: boolean = await createHeadscaleUser(newUser.id);
+	  if (!createdHeadscaleUser) {
+      	return res.status(502).json({
+        	error: 'Failed to add new user to Headscale private network.'
+      	});
+	  }
 
       await client.query('COMMIT');
 
@@ -141,49 +148,26 @@ router.post(
         return res.status(401).json({ error: 'Invalid email or password.' });
       }
 
-      let rawMqttPassword: string;
       let mqttUsername = user.mqtt_username;
 
-      // Lazy-provision MQTT credentials if user was registered prior to MQTT setup
-      if (!mqttUsername || !user.mqtt_password_hash) {
-        rawMqttPassword = crypto.randomBytes(18).toString('hex');
-        const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
+	  const rawMqttPassword = deriveDeterministicMqttPassword(user.id);
 
+	  // ONLY provision if the user predates MQTT setup
+	  // Do NOT rotate passwords on regular logins to keep multi-device session stable
+      if (!mqttUsername || !user.mqtt_password_hash) {
+        // rawMqttPassword = crypto.randomBytes(18).toString('hex');
+        const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
         mqttUsername = await provisionMqttUserInMosquitto(user.id, rawMqttPassword);
 
         await pool.query(
           'UPDATE users SET mqtt_username = $1, mqtt_password_hash = $2 WHERE id = $3',
           [mqttUsername, mqttPasswordHash, user.id]
         );
-      } else {
-        // Generate temporary session password or re-synchronize credential for active login session
-        rawMqttPassword = crypto.randomBytes(18).toString('hex');
-        const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
-
-        // Update password in Mosquitto via DynSec Admin Client
-        const updatePassCmd = {
-          commands: [
-            {
-              command: 'setClientPassword',
-              username: mqttUsername,
-              password: rawMqttPassword
-            }
-          ]
-        };
-        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify(updatePassCmd));
-
-        // Sync new password hash into PostgreSQL
-        await pool.query(
-          'UPDATE users SET mqtt_password_hash = $1 WHERE id = $2',
-          [mqttPasswordHash, user.id]
-        );
-      }
+      } 
 
       const returningUser = { id: user.id, username: user.username} as UserPayload;
       const accessToken = generateAccessToken(returningUser);
       const refreshToken = generateRefreshToken(returningUser);
-      // Generate API JWT
-      // const token = jwt.sign({ userId: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
 
       return res.status(200).json({
         message: 'Login successful',
@@ -263,35 +247,42 @@ router.post(
   // Separate "Bearer" from the actual JWT string
   const token = authHeader.split(' ')[1];
 
-  const { csr } = req.body;
+  // const { csr } = req.body;
+  const { hardware_id } = req.body;
 
-  if (!csr) {
-    return res.status(400).json({ 
-      error: 'Bad Request: Missing Certificate Signing Request from device.' 
-    });
-  }
-
-  const csrParam = jsrsasign.KJUR.asn1.csr.CSRUtil.getParam(csr);
-
-  // Read the Common Name (CN) directly from the parsed subject metadata map
-  if (!csrParam || !csrParam.subject || !csrParam.subject.str) {
-      return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR." });
-  }
-        
-  const subjectString: string = csrParam.subject.str;
-
-  const cnMatch = subjectString.match(/CN=([^/]+)/);
-  if (!cnMatch) {
-      return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR string." });
-  }
-
-  const hardware_id: string = cnMatch[1];
+  // if (!csr) {
+  //  return res.status(400).json({ 
+  //    error: 'Bad Request: Missing Certificate Signing Request from device.' 
+  //  });
+  // }
 
   if (!hardware_id) {
     return res.status(400).json({ 
-      error: 'Bad Request: Missing Hardware ID in CSR.' 
+      error: 'Bad Request: Missing Hardware ID from device.' 
     });
   }
+
+  // const csrParam = jsrsasign.KJUR.asn1.csr.CSRUtil.getParam(csr);
+
+  // Read the Common Name (CN) directly from the parsed subject metadata map
+  // if (!csrParam || !csrParam.subject || !csrParam.subject.str) {
+  //    return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR." });
+  // }
+        
+  // const subjectString: string = csrParam.subject.str;
+
+  // const cnMatch = subjectString.match(/CN=([^/]+)/);
+  // if (!cnMatch) {
+  //    return res.status(400).json({ error: "CN (Common Name) attribute missing inside the compiled CSR string." });
+  // }
+
+  // const hardware_id: string = cnMatch[1];
+
+  // if (!hardware_id) {
+  //  return res.status(400).json({ 
+  //    error: 'Bad Request: Missing Hardware ID in CSR.' 
+  //  });
+  // }
 
   const client: PoolClient = await pool.connect();
 
@@ -328,7 +319,7 @@ router.post(
 
     if (whitelistEntry.status === 'active') {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Device is already registered by another user.' });
+      return res.status(400).json({ error: 'Device is already registered by a user.' });
     }
 
     // Create new device ID
@@ -338,11 +329,11 @@ router.post(
     // Request signature from local CFSSL container on port 8888
     // const cfsslDomain = process.env.NODE_ENV === 'production' ? 'cfssl' : 'localhost';
     // const cfsslResponse = await axios.post<CFSSLSignedResponse>(`http://${cfsslDomain}:8888/api/v1/cfssl/sign`, {
-        // certificate_request: csr,
-        // profile: "client",
-        // subject: {
-          // CN: `device_${deviceId}`
-        //}
+    //     certificate_request: csr,
+    //     profile: "client",
+    //     subject: {
+    //       CN: `device_${deviceId}`
+	// }    
     // });
 	
 	const preauthKey = await generateHeadscalePreauthKey(decoded.userId, `tag:edge-device-${decoded.userId}`);
@@ -356,15 +347,15 @@ router.post(
     );
     const device = newDevice.rows[0];
 
-    const mqttUsername = await provisionEdgeDeviceInMosquitto(device.id, device.user_id);
+    // const mqttUsername = await provisionEdgeDeviceInMosquitto(device.id, device.user_id);
 
     // 5. Save the hardware_id and update MQTT credentials in PostgreSQL
-    await client.query(
-      `UPDATE devices 
-       SET mqtt_username = $1
-       WHERE id = $2`,
-      [mqttUsername, device.id]
-    );
+    // await client.query(
+    //  `UPDATE devices 
+    //   SET mqtt_username = $1
+    //   WHERE id = $2`,
+    //  [mqttUsername, device.id]
+    // );
 
     // ─────────────────────────────────────────────────────────────
     // Update device_whitelist to link user and mark as active
@@ -383,7 +374,7 @@ router.post(
     // Return signed certificate to the edge device
     return res.json({
       message: 'Device successfully verified and provisioned!',
-      // signed_certificate: cfsslResponse.data.result.certificate
+      // signed_certificate: cfsslResponse.data.result.certificate,
 	  preauth_key: preauthKey,
 	  login_server: ENV.HEADSCALE_SUBDOMAIN,
     });
@@ -404,6 +395,16 @@ router.post(
 
       return res.status(400).json({ error: 'This hardware ID is already registered to another device.' });
     }
+
+	// --- HANDLE HEADSCALE PREAUTH KEY ERRORS ---
+	const errorMessage = err instanceof Error ? err.message : 'Unknown Headscale Error occured';
+
+	if (errorMessage.includes('Headscale') || (err as any).response) {
+		console.error('Headscale Preauth Generation Error:', errorMessage);
+		return res.status(503).json({
+			error: `Failed to generate Headscale preauth key: ${errorMessage}`
+		});
+	}
 
     console.error('Error verifying setup token:', err);
     return res.status(400).json({ error: 'Invalid setup token or verification failed.' });
