@@ -17,12 +17,13 @@ export const setOnUnauthorizedCallback = (callback: () => void) => {
   onUnauthorizedCallback = callback;
 };
 
-// 1. Request Interceptor: Attach Access Token to every outgoing request
+// Request Interceptor: Attach Access Token to every outgoing request
 apiClient.interceptors.request.use(
   async (config: InternalAxiosRequestConfig) => {
     try {
       const accessToken = await SecureStore.getItemAsync('accessToken');
       if (accessToken && config.headers) {
+        console.log("SENDING ACCESS TOKEN");
         config.headers.Authorization = `Bearer ${accessToken}`;
       }
     } catch (error) {
@@ -33,7 +34,7 @@ apiClient.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// 2. Response Interceptor: Catch 401s, refresh token, and retry request
+// Response Interceptor: Catch 401s, refresh token, and retry request
 let isRefreshing = false;
 let failedQueue: Array<{
   resolve: (token: string) => void;
@@ -58,6 +59,17 @@ apiClient.interceptors.response.use(
 
     // If error is 401 and we haven't already tried retrying this request
     if (error.response?.status === 401 && !originalRequest._retry) {
+
+      // 🛡️ SAFETY CHECK: If the 401 came from the refresh route itself, don't loop!
+      if (originalRequest.url?.includes('/api/auth/refresh')) {
+        await SecureStore.deleteItemAsync('accessToken');
+        await SecureStore.deleteItemAsync('refreshToken');
+        if (onUnauthorizedCallback) {
+          onUnauthorizedCallback();
+        }
+        return new Promise(() => {});
+      }
+
       if (isRefreshing) {
         // If a refresh is already in progress, queue this request
         return new Promise((resolve, reject) => {
@@ -79,15 +91,18 @@ apiClient.interceptors.response.use(
           throw new Error('No refresh token available');
         }
 
+        console.log('SENDING REFRESH TOKEN');
         // Request a new access token from the backend
         const response = await axios.post(`${BASE_URL}/api/auth/refresh`, {
           refreshToken: storedRefreshToken,
         });
 
         const { accessToken: newAccessToken } = response.data;
+        console.log(`RETRIEVED NEW ACCESS TOKEN ${newAccessToken}`);
 
         // Save the new access token securely
         await SecureStore.setItemAsync('accessToken', newAccessToken);
+        console.log('STORED NEW ACCESS TOKEN');
 
         // Update default headers and retry pending requests
         apiClient.defaults.headers.common['Authorization'] = `Bearer ${newAccessToken}`;
@@ -97,11 +112,14 @@ apiClient.interceptors.response.use(
 
         // Retry original failed request
         originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
+
+        console.log('SENDING ORIGINAL REQUEST');
         return apiClient(originalRequest);
       } catch (refreshError) {
         processQueue(refreshError, null);
         isRefreshing = false;
 
+        console.log('TOKENS EXPIRED CLEARING KEYCHAIN');
         // Refresh token expired or is invalid -> Force Logout
         await SecureStore.deleteItemAsync('accessToken');
         await SecureStore.deleteItemAsync('refreshToken');
@@ -113,8 +131,12 @@ apiClient.interceptors.response.use(
 
         // Trigger global logout event or callback here (e.g., reset root navigation state)
         console.warn('[Auth] Session expired completely. Forcing logout.');
-        
-        return Promise.reject(refreshError);
+
+        // ✨ SILENT ABORT: Return a pending promise instead of throwing a loud error 
+        // that disrupts screen components during teardown.
+        return new Promise(() => {});
+
+        // return Promise.reject(refreshError);
       }
     }
 

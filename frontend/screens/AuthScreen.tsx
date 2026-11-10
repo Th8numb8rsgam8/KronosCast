@@ -43,14 +43,14 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.Re
       return;
     }
 
-    if (!EMAIL_REGEX.test(email)) {
-      Alert.alert('Validation Error', 'Please enter a valid email address.');
-      return;
-    }
-
     if (!isLoginMode){
       if (!username.trim()) {
         Alert.alert('Validation Error', 'Username is required for registration.');
+        return;
+      }
+
+      if (!EMAIL_REGEX.test(email)) {
+        Alert.alert('Validation Error', 'Please enter a valid email address.');
         return;
       }
 
@@ -61,38 +61,39 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.Re
         );
         return;
       }
-
     }
 
     setLoading(true);
     const endpoint = isLoginMode ? '/api/auth/login' : '/api/auth/signup';
-    const payload = isLoginMode ? { email, password } : { username, email, password };
+    const payload = isLoginMode 
+      ? { identifier: email.trim(), password } 
+      : { username: username.trim(), email: email.trim(), password };
+
+    // const payload = isLoginMode ? { email, password } : { username, email, password };
 
     try {
-        const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}${endpoint}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
+      const response = await fetch(`${ENV.BACKEND_PROTOCOL}://${ENV.BACKEND_IP}:${ENV.BACKEND_PORT}${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+      });
 
-        const data = await response.json();
+      const data = await response.json();
 
-        if (response.ok) {
-          // Alert.alert('Success', isLoginMode ? 'Logged in successfully!' : 'Account created successfully!');
-
-          if (!isLoginMode || data.requiresVerification) {
-            setPendingVerificationEmail(email);
-            Alert.alert('Check Your Email', 'We sent a 6-digit verification code to your inbox.');
-          } else {
-            // Standard login success
-            // Pass full AuthState (user, token, mqtt credentials) to parent
-            onAuthSuccess({
-              user: data.user,
-              access_token: data.access_token,
-              refresh_token: data.refresh_token,
-              mqtt: data.mqtt,
-            });
-          }
+      if (response.ok) {
+        if (!isLoginMode || data.requiresVerification) {
+          setPendingVerificationEmail(email);
+          Alert.alert('Check Your Email', 'We sent a 6-digit verification code to your inbox.');
+        } else {
+          // Standard login success
+          // Pass full AuthState (user, token, mqtt credentials) to parent
+          onAuthSuccess({
+            user: data.user,
+            access_token: data.access_token,
+            refresh_token: data.refresh_token,
+            mqtt: data.mqtt,
+          });
+        }
       } else {
         if (data.requiresVerification) {
           setPendingVerificationEmail(data.email || email);
@@ -213,7 +214,7 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps): React.Re
         )}
         <TextInput
           style={styles.input}
-          placeholder="Email Address"
+          placeholder={isLoginMode ? "Username or Email" : "Email Address"}
           placeholderTextColor="#64748b"
           value={email}
           onChangeText={setEmail}

@@ -67,8 +67,14 @@ function useMQTT(mqttInfo?: MqttCredentials) {
 
         client.on('error', (err) => {
           if (isMounted) {
-            console.error('[MQTT] Socket error:', err);
-            setError(err.message || 'MQTT Connection Error');
+            if (err.message?.includes('connack timeout') || err.message?.includes('ETIMEDOUT') || err.message?.includes('ECONNREFUSED')) {
+              console.log('[MQTT] Broker currently offline. Retrying in background...');
+            } else {
+              console.warn('[MQTT] Connection notice:', err.message);
+            }
+
+            setIsConnected(false);
+            setError(err.message);
           }
         });
 
@@ -374,7 +380,8 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
       </TouchableOpacity>
     );
   };
-const renderTelemetryData = (telemetryObj: any) => {
+
+  const renderTelemetryData = (telemetryObj: any) => {
     if (!telemetryObj || typeof telemetryObj !== 'object') {
       return <Text style={styles.telemetryPlaceholder}>Waiting for telemetry metrics...</Text>;
     }
