@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import jwt, { SignOptions } from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 import { pool } from "../config/database";
 import { PoolClient, DatabaseError } from "pg";
 import mqttAdminClient, { deriveDeterministicMqttPassword } from "../services/mqtt.service";
@@ -16,6 +17,17 @@ import { SignupRequestBody, LoginRequestBody, UserPayload, UserRow } from "../ty
 import { DeviceRow, SetupJwtPayload, VerifySetupRequestBody } from "../types/device.types";
 // import { CFSSLSignedResponse } from '../types/mqtt.types'
 import { ENV } from "../config/env";
+
+const loginLimiter = rateLimit({
+	windowMs: 15 * 60 * 1000, 	// 15-minute window
+	max: 5, 					// Limit each IP to 5 failed/total login requests per window
+	standardHeaders: true,		// Return rate limit info in the  `RateLimit-*` headers
+	legacyHeaders: false,       // Disable the `X-RateLimit-*` headers
+	skipSuccessfulRequests: true,
+	message: {
+		error: 'Too many login attempts from this IP, please try again after 15 minutes.'
+	}
+});
 
 // Regex Patterns
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -271,6 +283,7 @@ router.post(
 // ----------------------------------------------------------------------------
 router.post(
   '/login',
+  loginLimiter,
   async (req: Request<{}, {}, LoginRequestBody>, res: Response): Promise<Response> => {
     const { identifier, password } = req.body;
 
@@ -569,5 +582,136 @@ router.post(
     client.release();
   }
 });
+
+// ============================================================================
+// FORGOT PASSWORD ENDPOINT (Request OTP)
+// ============================================================================
+router.post(
+  '/forgot-password',
+  async (req: Request, res: Response): Promise<Response> => {
+    const { email } = req.body;
+
+    if (!email || !EMAIL_REGEX.test(email)) {
+      return res.status(400).json({ error: 'Please enter a valid email address.' });
+    }
+
+    try {
+      const result = await pool.query(
+        'SELECT id, is_verified FROM users WHERE email = $1', 
+        [email.toLowerCase().trim()]
+      );
+
+      // Security Best Practice: Even if the user doesn't exist, 
+      // return a generic success message to prevent user enumeration attacks.
+      if (result.rows.length === 0 || !result.rows[0].is_verified) {
+        return res.status(200).json({ 
+          success: true, 
+          message: 'If an account with that email exists, a password reset code has been sent.' 
+        });
+      }
+
+      const user = result.rows[0];
+      const rawOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      const otpHash = await bcrypt.hash(rawOtp, 10);
+      // Reuse your OTP TTL or set a shorter window for password resets (e.g., 10 mins)
+      const otpExpiresAt = new Date(Date.now() + ENV.OTP_TTL * 60 * 1000);
+
+      // Save the reset OTP hash and expiry to database
+      await pool.query(
+        `UPDATE users 
+         SET email_otp_hash = $1, email_otp_expires_at = $2 
+         WHERE id = $3`,
+        [otpHash, otpExpiresAt, user.id]
+      );
+
+      // Send the code via Brevo SMTP (you can create a helper or reuse sendVerificationEmail)
+      await sendVerificationEmail(email.trim(), rawOtp);
+
+      return res.status(200).json({ 
+        success: true, 
+        message: 'Password reset code has been sent to your email.' 
+      });
+    } catch (err) {
+      console.error('Forgot Password Error:', err);
+      return res.status(500).json({ error: 'Internal server error during password reset request.' });
+    }
+  }
+);
+
+// ============================================================================
+// RESET PASSWORD ENDPOINT (Verify OTP & Set New Password)
+// ============================================================================
+router.post(
+  '/reset-password',
+  async (req: Request, res: Response): Promise<Response> => {
+    const { email, otp, newPassword } = req.body;
+
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({ error: 'Email, OTP code, and new password are required.' });
+    }
+
+    // Validate Password Strength against your regex
+    if (!STRONG_PASSWORD_REGEX.test(newPassword)) {
+      return res.status(400).json({
+        error: 'Password must be at least 8 characters long and contain an uppercase letter, lowercase letter, number, and special character.'
+      });
+    }
+
+    const client: PoolClient = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const result = await client.query<UserRow>(
+        'SELECT id, email_otp_hash, email_otp_expires_at FROM users WHERE email = $1',
+        [email.toLowerCase().trim()]
+      );
+
+      if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'User not found.' });
+      }
+
+      const user = result.rows[0];
+
+      if (!user.email_otp_hash || !user.email_otp_expires_at || new Date() > new Date(user.email_otp_expires_at)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Reset code has expired. Please request a new one.' });
+      }
+
+      const isOtpValid = await bcrypt.compare(otp, user.email_otp_hash);
+      if (!isOtpValid) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Invalid verification code.' });
+      }
+
+      // Hash the new password
+      const newPasswordHash = await bcrypt.hash(newPassword, 10);
+
+      // Update password and clear the OTP fields
+      await client.query(
+        `UPDATE users 
+         SET password_hash = $1, 
+             email_otp_hash = NULL, 
+             email_otp_expires_at = NULL 
+         WHERE id = $2`,
+        [newPasswordHash, user.id]
+      );
+
+      await client.query('COMMIT');
+
+      return res.status(200).json({
+        success: true,
+        message: 'Password has been reset successfully!',
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('Reset Password Error:', err);
+      return res.status(500).json({ error: 'Internal server error during password reset.' });
+    } finally {
+      client.release();
+    }
+  }
+);
 
 export default router;
