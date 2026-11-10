@@ -150,6 +150,18 @@ export async function provisionEdgeDeviceInMosquitto(deviceId: string, userId: s
   return mqttUsername;
 }
 
+export async function deleteMqttUserFromMosquitto(userId: string, mqttUser: string): Promise<void> {
+	const userRoleName = `role_user_${userId}`;
+
+	mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+    	commands: [{ command: 'deleteClient', username: mqttUser }]
+    }));
+
+    mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+       commands: [{ command: 'deleteRole', rolename: userRoleName }]
+    }));
+}
+
 /**
  * Helper to construct the standard MQTT payload returned to the mobile client
  */

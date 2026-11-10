@@ -47,8 +47,15 @@ export const verifyJwtMiddleware = (requiredScope?: string) => {
             // Attach decoded info to the request object
             req.user = decoded;
             next();
-        } catch (err) {
-            res.status(401).json({ error: 'Unauthorized: Token expired or invalid.' });
+        } catch (err: any) {
+
+			if (err.name === 'TokenExpiredError') {
+				console.log('Token expired at:', err.expiredAt);
+            	res.status(401).json({ error: 'Your session has expired. Please log in again.' });
+				return;
+			}
+			console.log('Invalid or tampered token:', err.message);
+            res.status(401).json({ error: 'Unauthorized: Token is invalid.' });
             return;
         }
     };

@@ -8,7 +8,7 @@ import bcrypt from 'bcrypt';
 // import axios from 'axios';
 import { createUserAccountDeleteHandler } from "../controllers/auth.controller";
 import { verifyJwtMiddleware } from "../middleware/auth.middleware";
-import { generateAccessToken, generateRefreshToken } from '../controllers/auth.controller';
+import { generateAccessToken, generateRefreshToken, refreshTokenHandler } from '../controllers/auth.controller';
 import { provisionMqttUserInMosquitto, provisionEdgeDeviceInMosquitto, buildMqttResponseObject } from "../services/mqtt.service";
 import { createHeadscaleUser, generateHeadscalePreauthKey} from "../services/headscale.service";
 import { sendVerificationEmail } from "../services/email.service";
@@ -28,6 +28,8 @@ router.delete(
   verifyJwtMiddleware(),
   createUserAccountDeleteHandler(pool, mqttAdminClient)
 );
+
+router.post('/refresh', refreshTokenHandler(pool));
 
 // User Signup Endpoint
 router.post(
@@ -62,7 +64,7 @@ router.post(
       // Generate 6-digit OTP code & hash it
       const rawOtp = Math.floor(100000 + Math.random() * 900000).toString();
       const otpHash = await bcrypt.hash(rawOtp, 10);
-      const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes expiry
+      const otpExpiresAt = new Date(Date.now() + ENV.OTP_TTL * 60 * 1000); // 10 minutes expiry
 
       // Insert new user into database
       const userResult = await client.query<{ id: string; username: string; email: string }>(
@@ -75,9 +77,7 @@ router.post(
       const newUser = userResult.rows[0];
 
       // Send verification email via Brevo SMTP
-      console.log("SENDING VERIFICATION EMAIL");
       await sendVerificationEmail(newUser.email, rawOtp);
-      console.log("SENT VERIFICATION EMAIL");
       await client.query('COMMIT');
 
 	  const rawMqttPassword = deriveDeterministicMqttPassword(newUser.id);
@@ -248,7 +248,7 @@ router.post(
       const user = result.rows[0];
       const rawOtp = Math.floor(100000 + Math.random() * 900000).toString();
       const otpHash = await bcrypt.hash(rawOtp, 10);
-      const otpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+      const otpExpiresAt = new Date(Date.now() + ENV.OTP_TTL * 60 * 1000);
 
       await pool.query(
         'UPDATE users SET email_otp_hash = $1, email_otp_expires_at = $2 WHERE id = $3',
@@ -256,9 +256,7 @@ router.post(
       );
 
       // Send new code via Brevo SMTP
-      console.log("SENDING VERIFICATION");
       await sendVerificationEmail(email, rawOtp);
-      console.log("SENT VERIFICATION");
 
       return res.status(200).json({ success: true, message: 'New verification code sent.' });
     } catch (err) {
@@ -274,21 +272,24 @@ router.post(
 router.post(
   '/login',
   async (req: Request<{}, {}, LoginRequestBody>, res: Response): Promise<Response> => {
-    const { email, password } = req.body;
+    const { identifier, password } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required.' });
+    if (!identifier || !password) {
+      return res.status(400).json({ error: 'Username or email and password are required.' });
     }
 
     try {
-      // Fetch user record including MQTT fields
+
+		const cleanIdentifier = identifier.toLowerCase().trim();	
+
+      	// Fetch user record including MQTT fields
       const result = await pool.query<UserRow>(
-        'SELECT id, username, email, password_hash, mqtt_username, mqtt_password_hash, is_verified FROM users WHERE email = $1',
-        [email.toLowerCase().trim()]
+        'SELECT id, username, email, password_hash, mqtt_username, mqtt_password_hash, is_verified FROM users WHERE LOWER(username) = $1 OR LOWER(email) = $1',
+        [cleanIdentifier]
       );
 
       if (result.rows.length === 0) {
-        return res.status(401).json({ error: 'Invalid email or password.' });
+        return res.status(401).json({ error: 'Invalid username/email or password.' });
       }
 
       const user = result.rows[0];
@@ -304,7 +305,7 @@ router.post(
       // Validate password
       const passwordMatch = await bcrypt.compare(password, user.password_hash);
       if (!passwordMatch) {
-        return res.status(401).json({ error: 'Invalid email or password.' });
+        return res.status(401).json({ error: 'Invalid username/email or password.' });
       }
 
       let mqttUsername = user.mqtt_username;

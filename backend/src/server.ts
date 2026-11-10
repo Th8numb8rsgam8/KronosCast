@@ -12,7 +12,7 @@ import deviceRoutes from './routes/device.routes';
 import factoryRoutes from './routes/factory.routes';
 import videoRoutes from './routes/video.routes';
 import mtlsRoutes from './routes/mtls.routes';
-import { initDb } from './config/database';
+import { initDb, startUnverifiedUserCleanupJob } from './config/database';
 import { ENV } from './config/env';
 
 const publicApp: Application = express();
@@ -41,6 +41,8 @@ const startServer = async () => {
   try {
     await initDb();
     console.log('📦 Database initialized successfully.');
+
+	startUnverifiedUserCleanupJob();
 
     http.createServer(publicApp).listen(ENV.NODE_UNENCRYPTED_PORT, () => {
         console.log(`🌐 Port ${ENV.NODE_UNENCRYPTED_PORT}: Unencrypted NodeJS HTTP Server Active`);

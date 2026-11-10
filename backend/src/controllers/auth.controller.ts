@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { Pool } from 'pg';
 import mqtt from 'mqtt';
 import { deleteHeadscaleUser, deleteHeadscaleNodeByHostname } from '../services/headscale.service';
+import { deleteMqttUserFromMosquitto } from '../services/mqtt.service';
 import { deleteAllUserVideosFromSpaces } from '../controllers/video.controller';
 import { ENV } from '../config/env';
 
@@ -11,7 +12,7 @@ export const generateAccessToken = (user: { id: string; username: string }): str
   return jwt.sign(
     { id: user.id, username: user.username }, 
     ENV.JWT_ACCESS_SECRET, 
-    { expiresIn: '15m' }
+    { expiresIn: ENV.JWT_ACCESS_TTL } as jwt.SignOptions
   );
 };
 
@@ -20,9 +21,67 @@ export const generateRefreshToken = (user: { id: string; username: string }): st
   return jwt.sign(
     { id: user.id, username: user.username }, 
     ENV.JWT_REFRESH_SECRET, 
-    { expiresIn: '7d' }
+    { expiresIn: ENV.JWT_REFRESH_TTL } as jwt.SignOptions
   );
 };
+
+export const refreshTokenHandler = (pool: Pool) => {
+return async (req: Request, res: Response) => {
+  try {
+    // Extract the refresh token from the request body
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(401).json({ error: 'Refresh token is required.' });
+    }
+
+    let payload: any;
+
+    try {
+      // Verify the refresh token's signature and expiration using refresh secret
+      payload = jwt.verify(refreshToken, ENV.JWT_REFRESH_SECRET);
+    } catch (err: any) {
+      if (err.name === 'TokenExpiredError') {
+        return res.status(403).json({ error: 'Refresh token has expired. Please log in again.' });
+      }
+      return res.status(403).json({ error: 'Invalid refresh token.' });
+    }
+
+    // 3. Optional Security Check: Fetch user from DB to ensure they haven't been deleted,
+    // banned, or had their tokens invalidated (e.g., password change version check)
+    const userResult = await pool.query(
+      `SELECT id, username, email, is_verified FROM users WHERE id = $1`,
+      [payload.id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(403).json({ error: 'User no longer exists.' });
+    }
+
+    const user = userResult.rows[0];
+
+    if (!user.is_verified) {
+      return res.status(403).json({ error: 'User account is not verified.' });
+    }
+
+    // 4. Generate a brand new, short-lived JWT access token (e.g., 15 minutes)
+    const newAccessToken = jwt.sign(
+      { userId: user.id, username: user.username },
+      ENV.JWT_ACCESS_SECRET,
+      { expiresIn: ENV.JWT_ACCESS_TTL } as jwt.SignOptions
+    );
+
+    // 5. Send the new access token back to the frontend client
+    return res.status(200).json({
+      accessToken: newAccessToken,
+    });
+
+  } catch (err) {
+    console.error('Refresh token error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+}
+}
 
 export const createUserAccountDeleteHandler = (pool: Pool, mqttAdminClient: mqtt.MqttClient) => {
   return async (req: Request, res: Response): Promise<void> => {
@@ -91,32 +150,33 @@ export const createUserAccountDeleteHandler = (pool: Pool, mqttAdminClient: mqtt
       // Commit the database transaction
       await client.query('COMMIT');
 
-      // 4. Clean up Mosquitto Dynamic Security for all devices
-      for (const device of devices) {
-        const roleName = `role_device_${device.id}`;
+      // Clean up Mosquitto Dynamic Security for all devices
+      // for (const device of devices) {
+      //  const roleName = `role_device_${device.id}`;
         
-        if (device.mqtt_username) {
-          mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
-            commands: [{ command: 'deleteClient', username: device.mqtt_username }]
-          }));
-        }
+      //  if (device.mqtt_username) {
+      //    mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+      //      commands: [{ command: 'deleteClient', username: device.mqtt_username }]
+      //    }));
+      //  }
 
-        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
-          commands: [{ command: 'deleteRole', rolename: roleName }]
-        }));
-      }
+      //  mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+      //    commands: [{ command: 'deleteRole', rolename: roleName }]
+      //  }));
+      // }
 
       // 5. Clean up Mosquitto Dynamic Security for the user account itself
       if (userMqttUsername) {
-        const userRoleName = `role_user_${userId}`;
+		await deleteMqttUserFromMosquitto(userId, userMqttUsername);
+        // const userRoleName = `role_user_${userId}`;
 
-        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
-          commands: [{ command: 'deleteClient', username: userMqttUsername }]
-        }));
+        // mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+        //  commands: [{ command: 'deleteClient', username: userMqttUsername }]
+        // }));
 
-        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
-          commands: [{ command: 'deleteRole', rolename: userRoleName }]
-        }));
+        // mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+        //  commands: [{ command: 'deleteRole', rolename: userRoleName }]
+        // }));
       }
 
       res.status(200).json({ 

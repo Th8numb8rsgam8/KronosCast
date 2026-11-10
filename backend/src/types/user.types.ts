@@ -26,6 +26,6 @@ export interface SignupRequestBody {
 }
 
 export interface LoginRequestBody {
-  email?: string;
+  identifier?: string;
   password?: string;
 }
