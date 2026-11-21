@@ -34,6 +34,12 @@ export async function initDb(): Promise<void> {
           user_id UUID REFERENCES users(id) ON DELETE CASCADE,
           device_name VARCHAR(100) NOT NULL,
           hardware_id VARCHAR(255) UNIQUE NOT NULL,
+          mqtt_username VARCHAR(100) UNIQUE,
+          mqtt_password_hash VARCHAR(255),
+	  latitude DOUBLE PRECISION,
+	  longitude DOUBLE PRECISION,
+	  accuracy DOUBLE PRECISION,
+	  location_updated_at TIMESTAMP WITH TIME ZONE,
           created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
           CONSTRAINT unique_device_name_per_user UNIQUE (user_id, device_name)
 

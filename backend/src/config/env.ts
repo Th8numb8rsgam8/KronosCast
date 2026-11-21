@@ -31,7 +31,8 @@ const envSchema = z.object({
 	SMTP_USER: z.string(),
 	SMTP_PASSWORD: z.string(),
 	SMTP_FROM_EMAIL: z.string(),
-	BREVO_API_KEY: z.string()
+	BREVO_API_KEY: z.string(),
+	GOOGLE_MAPS_API_KEY: z.string()
 });
 
 const parsedEnv = envSchema.safeParse({
@@ -64,7 +65,8 @@ const parsedEnv = envSchema.safeParse({
 	SMTP_USER: process.env.SMTP_USER,
 	SMTP_PASSWORD: process.env.SMTP_PASSWORD,
 	SMTP_FROM_EMAIL: process.env.SMTP_FROM_EMAIL,
-	BREVO_API_KEY: process.env.BREVO_API_KEY
+	BREVO_API_KEY: process.env.BREVO_API_KEY,
+	GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY
 })
 
 if (!parsedEnv.success) {

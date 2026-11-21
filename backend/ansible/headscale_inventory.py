@@ -4,11 +4,13 @@ import json
 import subprocess
 import sys
 
+import pdb
+
 def get_headscale_inventory():
     try:
         # Run tailscale status inside your container to get active nodes as JSON
         # Replace 'tailscale_node' with your actual container name if different
-        docker_command = ['docker', 'exec', 'tailscale_node', 'tailscale', 'status', '--json']
+        docker_command = ['docker', 'exec', 'admin_tailscale', 'tailscale', 'status', '--json']
         result = subprocess.run(docker_command, capture_output=True, text=True, check=True)
         data = json.loads(result.stdout)
     except Exception as e:

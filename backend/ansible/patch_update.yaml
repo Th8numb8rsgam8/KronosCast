@@ -5,10 +5,29 @@
   gather_facts: yes
 
   tasks:
-    - name: Stop StreamSwitch Service
-      systemd:
-        name: streamswitch.service
-        state: stopped
+    # - name: Stop StreamSwitch Service
+    #   systemd:
+    #     name: streamswitch.service
+    #     state: stopped
+
+    - name: Deploy Service Wrapper Script
+      copy:
+        src: ./service-controller.sh
+        dest: /usr/local/bin/service-controller.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configure Sudoers Rule for Wrapper Script
+      copy:
+        content: |
+          # Allow edge-service user to run only tahe wrapper script via sudo without password
+          sentinel ALL=(ALL) NOPASSWD: /usr/local/bin/service-controller.sh *
+        dest: /etc/sudoers.d/edge-service-controller
+        owner: root
+        group: root
+        mode: '0440'
+        validate: visudo -cf %s
 
     # - name: Copy new compiled binary to target
     #   copy:

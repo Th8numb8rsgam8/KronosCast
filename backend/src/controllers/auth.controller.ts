@@ -110,7 +110,7 @@ export const createUserAccountDeleteHandler = (pool: Pool, mqttAdminClient: mqtt
 
       const userMqttUsername = userResult.rows[0].mqtt_username;
 
-      const devicesQuery = `SELECT id, hardware_id FROM devices WHERE user_id = $1;`;
+      const devicesQuery = `SELECT id, hardware_id, mqtt_username FROM devices WHERE user_id = $1;`;
       const devicesResult = await client.query(devicesQuery, [userId]);
       const devices = devicesResult.rows;
 
@@ -151,32 +151,23 @@ export const createUserAccountDeleteHandler = (pool: Pool, mqttAdminClient: mqtt
       await client.query('COMMIT');
 
       // Clean up Mosquitto Dynamic Security for all devices
-      // for (const device of devices) {
-      //  const roleName = `role_device_${device.id}`;
+      for (const device of devices) {
+        const roleName = `role_device_${device.id}`;
         
-      //  if (device.mqtt_username) {
-      //    mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
-      //      commands: [{ command: 'deleteClient', username: device.mqtt_username }]
-      //    }));
-      //  }
+        if (device.mqtt_username) {
+          mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+            commands: [{ command: 'deleteClient', username: device.mqtt_username }]
+          }));
+        }
 
-      //  mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
-      //    commands: [{ command: 'deleteRole', rolename: roleName }]
-      //  }));
-      // }
+        mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
+          commands: [{ command: 'deleteRole', rolename: roleName }]
+        }));
+       }
 
       // 5. Clean up Mosquitto Dynamic Security for the user account itself
       if (userMqttUsername) {
 		await deleteMqttUserFromMosquitto(userId, userMqttUsername);
-        // const userRoleName = `role_user_${userId}`;
-
-        // mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
-        //  commands: [{ command: 'deleteClient', username: userMqttUsername }]
-        // }));
-
-        // mqttAdminClient.publish('$CONTROL/dynamic-security/v1', JSON.stringify({
-        //  commands: [{ command: 'deleteRole', rolename: userRoleName }]
-        // }));
       }
 
       res.status(200).json({ 

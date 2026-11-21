@@ -8,12 +8,55 @@ import spacesClient from '../services/spaces.service';
 
 export const createPlaylistJsonHandler = (pool: Pool) => {
   return async (req: Request, res: Response) => {
+
+	const { hardware_id } = req.body;
+
+	if (!hardware_id) {
+		return res.status(400).json({
+			error: 'Bad Request: Missing hardware ID from device.'
+		});
+	}
+
     const client = await pool.connect();
 
     try {
+    	const whitelistCheck = `
+      		SELECT status 
+      		FROM device_whitelist
+      		WHERE hardware_id = $1
+    	`;
+
+    	// const whitelistResult = await client.query(whitelistCheck, [deviceResult.rows[0].hardware_id]);
+    	const whitelistResult = await client.query(whitelistCheck, [hardware_id]);
+
+    	if (whitelistResult.rows.length === 0) {
+      		await client.release();
+      		return res.status(403).json({ error: 'Forbidden: Hardware ID is not whitelisted.' });
+    	}
+
+    	if (whitelistResult.rows[0].status !== "active") {
+      		await client.release();
+      		return res.status(400).json({ error: 'Hardware is not listed as active' });
+    	}
+
+    	const deviceQuery = `
+    		SELECT id, user_id
+    		FROM devices
+    		WHERE hardware_id = $1;
+   		`;
+
+    	const deviceResult = await client.query(deviceQuery, [hardware_id]);
+
+    	if (deviceResult.rows.length === 0) {
+    		client.release();
+    		res.status(404).json({ error: 'Device not found or does not belong to any user.' });
+    	}
 
       // 1. List all video objects currently stored in the bucket
-      const listCommand = new ListObjectsV2Command({ Bucket: ENV.DIGITAL_OCEAN_SPACES_BUCKET_NAME });
+      const listCommand = new ListObjectsV2Command({
+      	Bucket: ENV.DIGITAL_OCEAN_SPACES_BUCKET_NAME,
+      	Prefix: `${deviceResult.rows[0].user_id}/`,
+      });
       const response = await spacesClient.send(listCommand);
 
       if (!response.Contents) {

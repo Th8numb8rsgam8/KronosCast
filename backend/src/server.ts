@@ -16,7 +16,7 @@ import { initDb, startUnverifiedUserCleanupJob } from './config/database';
 import { ENV } from './config/env';
 
 const publicApp: Application = express();
-publicApp.set('trust proxy', 'loopback'); // Trust the loopback interface for proxy headers
+publicApp.set('trust proxy', 'uniquelocal'); // Trust the loopback interface for proxy headers
 publicApp.use(express.json());
 publicApp.use('/health', healthRoutes);
 publicApp.use('/api/auth', authRoutes);

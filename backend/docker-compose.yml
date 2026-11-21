@@ -78,7 +78,7 @@ services:
       - iot_production_network
 
   api-gateway:
-    image: nginx:1.31.8-trixie
+    image: nginx:1.31.9-trixie
     container_name: nginx_gateway
     restart: unless-stopped
     ports:

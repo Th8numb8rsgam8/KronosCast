@@ -19,9 +19,9 @@ mqttAdminClient.on('error', (err: Error) => {
   console.error('Mosquitto Admin Connection Error:', err.message);
 });
 
-export function deriveDeterministicMqttPassword(userId: string): string {
+export function deriveDeterministicMqttPassword(Id: string): string {
 	const pepper = ENV.MQTT_PASSWORD_PEPPER;
-	return crypto.createHmac('sha256', pepper).update(`user_${userId}`).digest('hex');
+	return crypto.createHmac('sha256', pepper).update(`user_${Id}`).digest('hex');
 }
 
 export function getDeviceMqttTopics(userId: string, deviceId: string) {
@@ -96,7 +96,7 @@ export async function provisionMqttUserInMosquitto(userId: string, rawMqttPasswo
 /**
  * Provisions a dedicated MQTT user and ACL permissions for an individual edge device
  */
-export async function provisionEdgeDeviceInMosquitto(deviceId: string, userId: string): Promise<string> {
+export async function provisionEdgeDeviceInMosquitto(deviceId: string, userId: string, rawMqttPassword: string): Promise<string> {
   const mqttUsername = `device_${deviceId}`;
   const roleName = `role_device_${deviceId}`;
 
@@ -134,6 +134,7 @@ export async function provisionEdgeDeviceInMosquitto(deviceId: string, userId: s
       {
         command: 'createClient',
         username: mqttUsername,
+	password: rawMqttPassword,
         roles: [
           {
             rolename: roleName,

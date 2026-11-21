@@ -112,25 +112,12 @@ router.post(
 
       await client.query('COMMIT');
 
-      // Issue JWT authentication token for API access
-      // const token = jwt.sign({ userId: newUser.id, email: newUser.email }, JWT_SECRET, { expiresIn: '7d' });
-      // const user = { id: newUser.id, username: newUser.username} as UserPayload;
-      // const accessToken = generateAccessToken(user);
-      // const refreshToken = generateRefreshToken(user);
-
       return res.status(201).json({
         success: true,
         requiresVerification: true,
         email: newUser.email,
         message: 'Account created. Please check your email for the verification code.',
       });
-      // return res.status(201).json({
-      //  message: 'Signup successful',
-      //  user: newUser,
-      //  access_token: accessToken,
-      //  refresh_token: refreshToken,
-      //  mqtt: buildMqttResponseObject(newUser.id, mqttUsername, rawMqttPassword)
-      // });
     } catch (err: unknown) {
       await client.query('ROLLBACK');
 
@@ -287,6 +274,8 @@ router.post(
   async (req: Request<{}, {}, LoginRequestBody>, res: Response): Promise<Response> => {
     const { identifier, password } = req.body;
 
+	console.log(`LOGIN FROM ${req.ip}`);
+
     if (!identifier || !password) {
       return res.status(400).json({ error: 'Username or email and password are required.' });
     }
@@ -296,66 +285,66 @@ router.post(
 		const cleanIdentifier = identifier.toLowerCase().trim();	
 
       	// Fetch user record including MQTT fields
-      const result = await pool.query<UserRow>(
-        'SELECT id, username, email, password_hash, mqtt_username, mqtt_password_hash, is_verified FROM users WHERE LOWER(username) = $1 OR LOWER(email) = $1',
-        [cleanIdentifier]
-      );
+      	const result = await pool.query<UserRow>(
+        	'SELECT id, username, email, password_hash, mqtt_username, mqtt_password_hash, is_verified FROM users WHERE LOWER(username) = $1 OR LOWER(email) = $1',
+        	[cleanIdentifier]
+      	);
 
-      if (result.rows.length === 0) {
-        return res.status(401).json({ error: 'Invalid username/email or password.' });
-      }
+      	if (result.rows.length === 0) {
+        	return res.status(401).json({ error: 'Invalid username/email or password.' });
+      	}
 
-      const user = result.rows[0];
+      	const user = result.rows[0];
 
-      if (!user.is_verified) {
-        return res.status(403).json({ 
-          error: 'Please verify your email address before logging in.',
-          requiresVerification: true,
-          email: user.email
-        });
-      }
+      	if (!user.is_verified) {
+        	return res.status(403).json({ 
+          		error: 'Please verify your email address before logging in.',
+          		requiresVerification: true,
+          		email: user.email
+        	});
+      	}
 
-      // Validate password
-      const passwordMatch = await bcrypt.compare(password, user.password_hash);
-      if (!passwordMatch) {
-        return res.status(401).json({ error: 'Invalid username/email or password.' });
-      }
+      	// Validate password
+      	const passwordMatch = await bcrypt.compare(password, user.password_hash);
+      	if (!passwordMatch) {
+        	return res.status(401).json({ error: 'Invalid username/email or password.' });
+      	}
 
-      let mqttUsername = user.mqtt_username;
-	  const rawMqttPassword = deriveDeterministicMqttPassword(user.id);
+      	let mqttUsername = user.mqtt_username;
+	  	const rawMqttPassword = deriveDeterministicMqttPassword(user.id);
 
-	  // ONLY provision if the user predates MQTT setup
-	  // Do NOT rotate passwords on regular logins to keep multi-device session stable
-      if (!mqttUsername || !user.mqtt_password_hash) {
-        const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
-        mqttUsername = await provisionMqttUserInMosquitto(user.id, rawMqttPassword);
+	  	// ONLY provision if the user predates MQTT setup
+	  	// Do NOT rotate passwords on regular logins to keep multi-device session stable
+      	if (!mqttUsername || !user.mqtt_password_hash) {
+        	const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
+        	mqttUsername = await provisionMqttUserInMosquitto(user.id, rawMqttPassword);
 
-        await pool.query(
-          'UPDATE users SET mqtt_username = $1, mqtt_password_hash = $2 WHERE id = $3',
-          [mqttUsername, mqttPasswordHash, user.id]
-        );
-      } 
+        	await pool.query(
+          		'UPDATE users SET mqtt_username = $1, mqtt_password_hash = $2 WHERE id = $3',
+          		[mqttUsername, mqttPasswordHash, user.id]
+        	);
+      	} 
 
-      const returningUser = { id: user.id, username: user.username} as UserPayload;
-      const accessToken = generateAccessToken(returningUser);
-      const refreshToken = generateRefreshToken(returningUser);
+      	const returningUser = { id: user.id, username: user.username} as UserPayload;
+      	const accessToken = generateAccessToken(returningUser);
+      	const refreshToken = generateRefreshToken(returningUser);
 
-      return res.status(200).json({
-        message: 'Login successful',
-        user: {
-          id: user.id,
-          username: user.username,
-          email: user.email,
-        },
-        access_token: accessToken,
-        refresh_token: refreshToken,
-        mqtt: buildMqttResponseObject(user.id, mqttUsername, rawMqttPassword)
-      });
-    } catch (err) {
-      console.error('Login Error:', err);
-      return res.status(500).json({ error: 'Internal server error during login.' });
-    }
-  }
+      	return res.status(200).json({
+        	message: 'Login successful',
+        	user: {
+          		id: user.id,
+          		username: user.username,
+          		email: user.email,
+        	},
+        	access_token: accessToken,
+        	refresh_token: refreshToken,
+        	mqtt: buildMqttResponseObject(user.id, mqttUsername, rawMqttPassword)
+      	});
+    	} catch (err) {
+      		console.error('Login Error:', err);
+      		return res.status(500).json({ error: 'Internal server error during login.' });
+    	}
+  	}
 );
 
 // Request JWT Setup Token
@@ -407,15 +396,17 @@ router.post(
 
   // 1. Extract the Authorization header
   const authHeader = req.headers.authorization;
+  const parts = authHeader?.trim().split(/\s+/) ?? [];
+  const token = parts.length === 2 && parts[0] === 'Bearer' ? parts[1] : '';
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ 
-      error: 'Unauthorized: Missing or malformed Bearer token.' 
-    });
+  if (!token) {
+	  return res.status(401).json({
+      	error: 'Unauthorized: Missing or malformed Bearer token.' 
+	  });
   }
 
   // Separate "Bearer" from the actual JWT string
-  const token = authHeader.split(' ')[1];
+  // const token = authHeader.split(' ')[1];
 
   // const { csr } = req.body;
   const { hardware_id } = req.body;
@@ -517,15 +508,18 @@ router.post(
     );
     const device = newDevice.rows[0];
 
-    // const mqttUsername = await provisionEdgeDeviceInMosquitto(device.id, device.user_id);
+	const rawMqttPassword = deriveDeterministicMqttPassword(device.id);
+    const mqttPasswordHash = await bcrypt.hash(rawMqttPassword, 10);
+    const mqttUsername = await provisionEdgeDeviceInMosquitto(device.id, device.user_id, rawMqttPassword);
 
     // 5. Save the hardware_id and update MQTT credentials in PostgreSQL
-    // await client.query(
-    //  `UPDATE devices 
-    //   SET mqtt_username = $1
-    //   WHERE id = $2`,
-    //  [mqttUsername, device.id]
-    // );
+    await client.query(
+    	`UPDATE devices 
+    	SET mqtt_username = $1,
+			mqtt_password_hash = $2
+   		WHERE id = $3`,
+   		[mqttUsername, mqttPasswordHash, device.id]
+    );
 
     // ─────────────────────────────────────────────────────────────
     // Update device_whitelist to link user and mark as active
@@ -556,8 +550,13 @@ router.post(
       return res.status(401).json({ error: 'Setup token has expired. Please restart pairing.' });
     }
 
-    if (err instanceof DatabaseError && err.code === '23505') {
+	if (err instanceof jwt.JsonWebTokenError) {
+		return res.status(401).json({
+			error: `Invalid setup token (${err.message}). Please restart pairing.`
+		});
+	}
 
+    if (err instanceof DatabaseError && err.code === '23505') {
       const constraint = err.constraint;
       if (constraint === 'unique_device_name_per_user') {
         return res.status(400).json({ error: 'You already have a device with this name. Please choose a unique name.' });
@@ -577,7 +576,7 @@ router.post(
 	}
 
     console.error('Error verifying setup token:', err);
-    return res.status(400).json({ error: 'Invalid setup token or verification failed.' });
+    return res.status(500).json({ error: 'Internal server error during device verification' });
   } finally {
     client.release();
   }

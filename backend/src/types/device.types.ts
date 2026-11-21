@@ -45,3 +45,23 @@ export interface FactoryPayload {
   timestamp: string;
   signature: string;
 }
+
+export interface WifiAccessPoint {
+  macAddress: string;
+  signalStrength: number;
+  channel?: number;
+}
+
+export interface DeviceLocationPayload {
+  hardware_id: string;
+  considerIp?: boolean;
+  wifiAccessPoints: WifiAccessPoint[];
+}
+
+export interface GoogleGeolocationResponse {
+  location: {
+    lat: number;
+    lng: number;
+  };
+  accuracy: number;
+}
