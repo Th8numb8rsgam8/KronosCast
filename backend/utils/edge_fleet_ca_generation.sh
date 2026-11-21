@@ -11,4 +11,19 @@ ssh-keygen -s ~/.ssh/ssh_ca_key -I droplet-admin-key -V +1d -n pi ~/.ssh/id_ed25
 # sudo chown root:root /etc/ssh/ssh_ca_key.pub
 # sudo chmod 644 /etc/ssh/ssh_ca_key.pub
 #
+
+# sudo ssh -t
 # sudo systemctl restart ssh
+
+# Disable password logins completely
+# PasswordAuthentication no
+# PubkeyAuthentication yes
+
+# Prevent direct root login over SSH
+# PermitRootLogin no
+
+# Disable empty passwords just in case
+# PermitEmptyPasswords no
+
+# Optional: Restrict authentication methods to keys only
+# AuthenticationMethods publickey

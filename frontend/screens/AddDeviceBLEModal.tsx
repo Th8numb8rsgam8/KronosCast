@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { User } from '../types/auth.types'
 import {
   Text,
@@ -14,13 +14,20 @@ import {
 import { BleManager, Device, Subscription, BleError } from 'react-native-ble-plx';
 import { Buffer } from 'buffer';
 import { apiClient } from '../api/interceptor';
-import { SessionState } from '../types/auth.types';
 import { ENV } from '../config/env';
 
 interface AddDeviceBLEModalProps {
   user: User;
   onClose: () => void;
   onSuccess: () => void;
+}
+
+interface ActiveProvisionSession {
+  cancelled: boolean;
+  finished: boolean;
+  subscription: Subscription | null;
+  connectedDevice: Device | null;
+  timeoutId: ReturnType<typeof setTimeout> | null;
 }
 
 const bleManager = new BleManager();
@@ -31,6 +38,68 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
   const [wifiPassword, setWifiPassword] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
   const [statusText, setStatusText] = useState<string>('');
+
+  const sessionRef = useRef<ActiveProvisionSession | null>(null);
+
+  const cleanupSession = async (session: ActiveProvisionSession | null): Promise<void> => {
+    if (!session) return;
+
+    bleManager.stopDeviceScan();
+
+    if (session.timeoutId) {
+      clearTimeout(session.timeoutId);
+      session.timeoutId = null;
+    }
+
+    if (session.subscription) {
+      session.subscription.remove();
+      session.subscription = null;
+    }
+
+    if (session.connectedDevice) {
+      const deviceId = session.connectedDevice.id;
+      session.connectedDevice = null;
+      try {
+        const isConnected = await bleManager.isDeviceConnected(deviceId);
+        if (isConnected) {
+          await bleManager.cancelDeviceConnection(deviceId);
+        }
+      } catch {
+        // Ignore teardown errors when cancelling or disconnecting
+      }
+    }
+  };
+
+  const handleCancel = async (): Promise<void> => {
+    const active = sessionRef.current;
+
+    if (!loading || !active) {
+      onClose();
+      return;
+    }
+
+    active.cancelled = true;
+    active.finished = true;
+    sessionRef.current = null;
+
+    setLoading(false);
+    setStatusText('');
+
+    await cleanupSession(active);
+    onClose();
+  };
+
+  useEffect(() => {
+    return () => {
+      const active = sessionRef.current;
+      if (active) {
+        active.cancelled = true;
+        active.finished = true;
+        sessionRef.current = null;
+        void cleanupSession(active);
+      }
+    };
+  }, []);
 
   const requestBLEPermissions = async (): Promise<boolean> => {
     if (Platform.OS === 'android') {
@@ -63,8 +132,6 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
 
   const handleStartOnboarding = async (): Promise<void> => {
 
-    const sessionState: SessionState = { isFinished: false };
-
     if (!deviceName.trim() || !wifiSsid.trim()) {
       Alert.alert('Validation Error', 'Device Name and Wi-Fi SSID are required.');
       return;
@@ -76,18 +143,38 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
       Alert.alert('Permission Denied', 'Bluetooth and Location permissions are required.');
       return;
     }
-    
+
+    // Tear down any lingering previous session before starting a new one
+    if (sessionRef.current) {
+      const stale = sessionRef.current;
+      stale.cancelled = true;
+      stale.finished = true;
+      sessionRef.current = null;
+      await cleanupSession(stale);
+    }
+
+    // Fresh session for this specific onboarding run
+    const session: ActiveProvisionSession = {
+      cancelled: false,
+      finished: false,
+      subscription: null,
+      connectedDevice: null,
+      timeoutId: null,
+    };
+    sessionRef.current = session;
+
     setLoading(true);
 
     try {
       // Step 1: Request signed JWT setup token from Express
       setStatusText('Generating JWT setup token...');
-
       const response = await apiClient.post('/api/auth/devices/request-setup', { deviceName });
-      const data = response.data;
 
-      const jwtToken = data.setupToken; // Signed JWT token
+      if (session.cancelled || session.finished || sessionRef.current !== session) {
+        return;
+      }
 
+      const jwtToken = response.data.setupToken; // Signed JWT token
       let isProcessingDevice = false;
 
       // Step 2: Scan for BLE Hardware
@@ -96,8 +183,16 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
         [ENV.SERVICE_UUID], 
         null, 
         async (error: BleError | null, device: Device | null) => {
+          if (session.cancelled || session.finished || sessionRef.current !== session) {
+            return;
+          }
+
           if (error) {
-            bleManager.stopDeviceScan();
+            session.finished = true;
+            if (sessionRef.current === session) {
+              sessionRef.current = null;
+            }
+            await cleanupSession(session);
             setLoading(false);
             Alert.alert('BLE Error', error.message);
             return;
@@ -106,63 +201,55 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
           if (device && !isProcessingDevice) {
             isProcessingDevice = true;
             bleManager.stopDeviceScan();
-            let statusSubscription: Subscription | null = null;
 
             try {
               setStatusText('Connecting via BLE...');
 
               const connectedDevice = await device.connect();
+              if (session.cancelled || session.finished || sessionRef.current !== session) {
+                try {
+                  await bleManager.cancelDeviceConnection(connectedDevice.id);
+                } catch {
+                  // Ignore disconnect errors after cancel
+                }
+                return;
+              }
+
+              session.connectedDevice = connectedDevice;
               await connectedDevice.discoverAllServicesAndCharacteristics();
 
               // Listen for status updates
-              statusSubscription = bleManager.monitorCharacteristicForDevice(
+              session.subscription = bleManager.monitorCharacteristicForDevice(
                 connectedDevice.id,
                 ENV.SERVICE_UUID,
                 ENV.STATUS_CHARACTERISTIC_UUID,
                 (charError: BleError | null, characteristic) => {
                   if (charError) {
-
-                    if (sessionState.isFinished) return;
-
-                    // const errorMsg = charError.message || '';
-                    // const errorCode = charError.errorCode;
-
-                    // if (
-                    //   errorCode === 2 ||
-                    //   errorCode === 201 ||
-                    //   errorMsg.toLowerCase().includes('cancel') ||
-                    //   errorMsg.toLowerCase().includes('disconnect')
-                    // ) {
-                    //   // console.log('[BLE] Cleanly suppressed cancellation/teardown error:', errorMsg);
-                    //   return;
-                    // }
-
-                    // console.error('[BLE Subscription Error]:', charError);
+                    if (session.cancelled || session.finished) return;
                     return;
                   }
 
                   if (characteristic?.value) {
+                    if (session.cancelled || session.finished) return;
+
                     const liveStatus = Buffer.from(characteristic.value, 'base64').toString('utf-8');
-                    // console.log('[BLE Live Status]:', liveStatus);
                     setStatusText(`Device Status: ${liveStatus}`);
 
                     if (liveStatus === 'SUCCESS') {
-                      sessionState.isFinished = true
-
-                      if (statusSubscription){
-                        statusSubscription.remove();
-                        statusSubscription = null
+                      session.finished = true
+                      if (sessionRef.current === session) {
+                        sessionRef.current = null;
                       }
+                      void cleanupSession(session);
                       setLoading(false);
                       Alert.alert('Success', 'Edge device provisioned successfully!');
                       onSuccess();
                     } else if (liveStatus.startsWith('ERROR_')) {
-                      sessionState.isFinished = true;
-
-                      if (statusSubscription){
-                        statusSubscription.remove();
-                        statusSubscription = null
+                      session.finished = true;
+                      if (sessionRef.current === session) {
+                        sessionRef.current = null;
                       }
+                      void cleanupSession(session);
                       setLoading(false);
                       Alert.alert('Provisioning Error', `Hardware reported error: ${liveStatus}`);
                     }
@@ -171,24 +258,23 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
               )
               await new Promise((resolve) => setTimeout(resolve, 300));
 
-              // Step 3: Transmit Wi-Fi Credentials + JWT Payload
-              // setStatusText('Sending SSID...');
+              // Transmit Wi-Fi Credentials + JWT Payload
               const ssidBase64 = Buffer.from(wifiSsid).toString('base64');
               await connectedDevice.writeCharacteristicWithResponseForService(
                 ENV.SERVICE_UUID,
                 ENV.SSID_CHARACTERISTIC_UUID,
                 ssidBase64
               );
+              if (session.cancelled || session.finished || sessionRef.current !== session) return;
 
-              // setStatusText('Sending Password...');
               const passBase64 = Buffer.from(wifiPassword).toString('base64');
               await connectedDevice.writeCharacteristicWithResponseForService(
                 ENV.SERVICE_UUID,
                 ENV.PASS_CHARACTERISTIC_UUID,
                 passBase64
               );
+              if (session.cancelled || session.finished || sessionRef.current !== session) return;
 
-              // setStatusText('Sending Token...');
               const negotiatedDevice = await connectedDevice.requestMTU(512);
               const chunkSize = negotiatedDevice.mtu;
               // const totalChunks = Math.ceil(jwtToken.length / chunkSize);
@@ -205,9 +291,9 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
                   chunkBase64
                 );
               }
+              if (session.cancelled || session.finished || sessionRef.current !== session) return;
 
-              // 2. Send __EOF__ marker to signal transmission completion
-              // console.log('Finalizing Token...');
+              // Send __EOF__ marker to signal transmission completion
               const eofBase64 = Buffer.from('__EOF__', 'utf-8').toString('base64');
               await connectedDevice.writeCharacteristicWithResponseForService(
                 ENV.SERVICE_UUID,
@@ -215,25 +301,24 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
                 eofBase64
               );
 
+              if (session.cancelled || session.finished || sessionRef.current !== session) return;
               setStatusText('Waiting for hardware to connect to Wi-Fi...');
 
-              // 6. Fail-safe timeout in case physical BLE notification gets dropped
-              setTimeout(() => {
-                if (!sessionState.isFinished) {
-                  if (statusSubscription) {
-                    statusSubscription.remove();
-                    statusSubscription = null;
-                  } 
+              // Fail-safe timeout in case physical BLE notification gets dropped
+              session.timeoutId = setTimeout(() => {
+                if (!session.cancelled && !session.finished && sessionRef.current === session) {
+                  session.finished = true;
+                  sessionRef.current = null;
+                  void cleanupSession(session);
                   setLoading(false);
                   Alert.alert('Timeout', 'Hardware did not respond in time.');
                   }
                 }, 35000);
             } catch (innerErr: unknown) {
-              if (!sessionState.isFinished){
-                if (statusSubscription){
-                  statusSubscription.remove();
-                  statusSubscription = null;
-                }
+              if (!session.cancelled && !session.finished && sessionRef.current === session){
+                session.finished = true;
+                sessionRef.current = null;
+                await cleanupSession(session);
                 setLoading(false);
                 const errorMessage = innerErr instanceof Error ? innerErr.message : 'Unknown provisioning error';
                 Alert.alert('Provisioning Error', errorMessage);
@@ -243,6 +328,12 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
         }
       );
     } catch (err: unknown) {
+      if (session.cancelled || session.finished || sessionRef.current !== session) {
+        return;
+      }
+      session.finished = true;
+      sessionRef.current = null;
+      await cleanupSession(session);
       setLoading(false);
       const errorMessage = err instanceof Error ? err.message : 'Unknown onboarding error';
       Alert.alert('Provisioning Failed', errorMessage);
@@ -293,8 +384,13 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
           {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Pair & Transmit over BLE</Text>}
         </TouchableOpacity>
 
-        <TouchableOpacity style={styles.cancelButton} onPress={onClose} disabled={loading}>
-          <Text style={styles.cancelButtonText}>Cancel</Text>
+        <TouchableOpacity 
+          style={styles.cancelButton} 
+          onPress={handleCancel} 
+          activeOpacity={0.7}>
+          <Text style={styles.cancelButtonText}>
+            {loading ? 'Cancel Provisioning' : 'Cancel'}
+          </Text>
         </TouchableOpacity>
       </View>
     </View>

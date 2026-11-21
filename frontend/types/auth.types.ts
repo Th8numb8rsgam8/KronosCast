@@ -15,10 +15,6 @@ export interface User {
   email: string;
 }
 
-export interface SessionState {
-  isFinished: boolean;
-}
-
 export interface AuthState {
   user: User;
   access_token?: string;

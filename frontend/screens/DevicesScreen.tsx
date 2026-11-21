@@ -137,6 +137,12 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
   // Store status for ALL devices mapped by deviceId: { [deviceId]: status }
   const [deviceStatusMap, setDeviceStatusMap] = useState<Record<string, string>>({});
 
+  // Mirror status map in a ref so message handlers & watchdog read latest state without nested updaters
+  const deviceStatusRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    deviceStatusRef.current = deviceStatusMap;
+  }, [deviceStatusMap]);
+
   // Track timestamp of the last received packet per device to calculate timeouts
   const deviceLastSeenRef = useRef<Record<string, number>>({});
 
@@ -151,24 +157,31 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
-      setDeviceStatusMap((prevStatus) => {
-        let updated = false;
-        const nextStatus = { ...prevStatus };
+      const currentStatuses = deviceStatusRef.current;
 
-        Object.keys(nextStatus).forEach((deviceId) => {
-          const lastSeen = deviceLastSeenRef.current[deviceId] || 0;
+      const timedOutIds = Object.keys(currentStatuses).filter((deviceId) => {
+        const lastSeen = deviceLastSeenRef.current[deviceId] || 0;
+        return currentStatuses[deviceId] === 'online' && now - lastSeen > 20000;
+      });
 
-          // If active for more than 15 seconds without communication, set offline
-          if (nextStatus[deviceId] === 'online' && now - lastSeen > 15000) {
-            nextStatus[deviceId] = 'offline';
-            setDeviceTelemetryMap((prev) => ({ ...prev, [deviceId]: null }));
-            updated = true;
-          }
+      if (timedOutIds.length > 0) {
+        setDeviceStatusMap((prev) => {
+          const next = { ...prev };
+          timedOutIds.forEach((id) => {
+            next[id] = 'offline';
+          });
+          return next;
         });
 
-        return updated ? nextStatus : prevStatus;
-      });
-    }, 5000); // Check every 5 seconds
+        setDeviceTelemetryMap((prev) => {
+          const next = { ...prev };
+          timedOutIds.forEach((id) => {
+            next[id] = null;
+          });
+          return next;
+        });
+      }
+    }, 5000);
 
     return () => clearInterval(interval);
   }, []);
@@ -182,44 +195,69 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
       mqttInfo.topics.statusSubscribe,
     ].filter(Boolean) as string[];
 
-
-    const handleMessage = (topic: string, payload: Buffer) => {
+    const handleMessage = (topic: string, payload: Buffer, packet: { retain?: boolean }) => {
       try {
         const messageStr = payload.toString('utf-8');
         const data = JSON.parse(messageStr);
 
-        const segments= topic.split('/');
+        const segments = topic.split('/');
         const deviceIdIndex = segments.indexOf('devices') + 1;
 
         if (deviceIdIndex > 0 && segments[deviceIdIndex]) {
           const deviceId = segments[deviceIdIndex];
           const subType = segments[segments.length - 1];
 
-          // Update last seen timestamp
-          deviceLastSeenRef.current[deviceId] = Date.now();
+          if (subType === 'status') {
+            const rawStatus = 
+              typeof data === 'object' && data !== null ? String(data.status || 'offline') : String(data);
+            const isOnline = rawStatus.trim().toLowerCase() === 'online';
 
-          if (subType === 'telemetry') {
+            setDeviceStatusMap((prev) => ({
+              ...prev,
+              [deviceId]: isOnline ? 'online' : 'offline',
+            }));
 
+            if (isOnline) {
+              deviceLastSeenRef.current[deviceId] = Date.now();
+            } else {
+              // Immediately wipe telemetry when LWT or explicit offline status arrives
+              delete deviceLastSeenRef.current[deviceId];
+              setDeviceTelemetryMap((prev) => ({
+                ...prev,
+                [deviceId]: null,
+              }));
+            }
+          } else if (subType === 'telemetry') {
+            // Skip retained telemetry if device is not currently online
+            if (packet?.retain && deviceStatusRef.current[deviceId] !== 'online') {
+              return;
+            }
+            // Update last seen timestamp
+            deviceLastSeenRef.current[deviceId] = Date.now();
             const processedData = { ... data};
 
             Object.keys(processedData).forEach((key) => {
-
               // Handle Raspberry Pi temperature formatting
-              if (key === "Operating Temperature") {
-                const celsius = processedData[key] / 1000;
-                processedData[key] = `${celsius.toFixed(1)}°C`;
+              if (key === "Temperature") {
+                const tempNum = Number(processedData[key]);
+                if (!Number.isNaN(tempNum)) {
+                  processedData[key] = `${(tempNum / 1000).toFixed(1)}°C`;
+                }
               }
 
-              if (key === "SSNano Service") {
-                const ssnano_status = processedData[key];
-                processedData[key] = ssnano_status.toUpperCase();
+              if (key === "SSNano Service" && typeof processedData[key] === 'string') {
+                processedData[key] = processedData[key].toUpperCase();
               }
             });
-            setDeviceTelemetryMap((prev) => ({ ...prev, [deviceId]: processedData }));
-          } else if (subType === 'status') {
-            const statusValue = typeof data === 'object' ? (data.status || 'online') : data;
-            setDeviceStatusMap((prev) => ({ ...prev, [deviceId]: statusValue }));
-          }
+
+            setDeviceStatusMap((prev) =>
+              prev[deviceId] === 'online' ? prev : { ...prev, [deviceId]: 'online' }
+            );
+            setDeviceTelemetryMap((prev) => ({
+              ...prev,
+              [deviceId]: processedData,
+            }));
+          } 
         }
       } catch (e) {
         console.warn(`[MQTT Parse Error] Topic ${topic}:`, e);
@@ -261,7 +299,7 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
     }
   };
 
-  // Construct dynamic command topic using your template format:
+  // Construct dynamic command topic using template format
   const handleSendCommand = (actionValue: string) => {
     if (!selectedDevice || !mqttInfo || !client) return;
     
@@ -468,7 +506,11 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
             
           <Text style={styles.panelSubHeader}>Live Telemetry Metrics</Text>
           <View style={styles.telemetryContainer}>
-            {renderTelemetryData(deviceTelemetryMap[selectedDevice.id])}
+            {renderTelemetryData(
+              (deviceStatusMap[selectedDevice.id] || 'offline').toLowerCase() === 'online'
+              ? deviceTelemetryMap[selectedDevice.id]
+              : null
+            )}
           </View>
 
           <Text style={styles.panelSubHeader}>Actions & Commands</Text>

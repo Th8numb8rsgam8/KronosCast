@@ -42,7 +42,6 @@ def factory_register(api_gateway_url, hardware_id):
         
         print(f"Sending signed registration for HWID: {hardware_id}...")
         response = requests.post(api_gateway_url, json=payload, timeout=10)
-        pdb.set_trace()
         
         if response.status_code == 200:
             print("Successfully pre-authorized via asymmetric verification!")
@@ -54,6 +53,7 @@ def factory_register(api_gateway_url, hardware_id):
 
 if __name__ == "__main__":
 
-    api_gateway_url = "http://localhost:80/api/factory/registration"
+    # api_gateway_url = "http://localhost:80/api/factory/registration"
+    api_gateway_url = "https://kronoscast.com/api/factory/registration"
     hardware_id = "861f80d775293ae5"
     factory_register(api_gateway_url, hardware_id)
