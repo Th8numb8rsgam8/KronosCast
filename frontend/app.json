@@ -1,22 +1,30 @@
 {
   "expo": {
-    "name": "IoT Telemetry Core",
-    "slug": "hivemq-mqtt-app",
+    "name": "KronosCast",
+    "slug": "kronos-iot",
     "version": "1.0.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "dark",
+    "icon": "./assets/images/icon.png",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.hivemqmqttapp",
+      "bundleIdentifier": "com.kronoscast.app",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSBluetoothPeripheralUsageDescription": "Allow $(PRODUCT_NAME) to discover and configure edge devices over Bluetooth."
       }
     },
     "android": {
-      "package": "com.anonymous.hivemqmqttapp",
+      "package": "com.kronoscast.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#0b0f19"
+      },
       "permissions": [
-        "INTERNET"
+        "INTERNET",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT"
       ]
     },
     "plugins": [
@@ -26,18 +34,30 @@
         "react-native-ble-plx",
         {
           "isBackgroundEnabled": false,
-          "modes": [
-            "peripheral",
-            "central"
-          ],
           "bluetoothAlwaysPermission": "Allow $(PRODUCT_NAME) to connect to nearby Bluetooth hardware."
         }
       ],
-      "expo-secure-store"
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#0b0f19"
+        }
+      ],
+      "expo-secure-store",
+      "expo-font"
+    ],
+    "owner": "b1gb0111",
+    "sdkVersion": "57.0.0",
+    "platforms": [
+      "ios",
+      "android"
     ],
     "extra": {
       "eas": {
-        "projectId": "2988ff39-ad3a-4326-a023-b3b6960f28a8"
+        "projectId": "9e613ada-9c14-4da8-9c65-016045fc0825"
       }
     }
   }

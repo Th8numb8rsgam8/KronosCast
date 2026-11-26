@@ -108,13 +108,11 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
         const result = await PermissionsAndroid.requestMultiple([
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
           PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
         ]);
 
         return (
           result[PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN] === PermissionsAndroid.RESULTS.GRANTED &&
-          result[PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT] === PermissionsAndroid.RESULTS.GRANTED &&
-          result[PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION] === PermissionsAndroid.RESULTS.GRANTED
+          result[PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT] === PermissionsAndroid.RESULTS.GRANTED
         );
       } 
       // Android 11 and lower require Fine Location permission to perform BLE scans
@@ -129,6 +127,23 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
     // iOS permissions are handled automatically via Info.plist at runtime
     return true;
   }
+
+  const negotiateUsableMtu = async (device: Device, requestedMtu = 512): Promise<number> => {
+    let effectiveMtu = device.mtu ?? 23;
+
+    if (Platform.OS === 'android') {
+      try {
+        const updatedDevice = await device.requestMTU(requestedMtu);
+        effectiveMtu = updatedDevice.mtu ?? effectiveMtu;
+      } catch {
+        // Fall back to device.mtu or standard BLE minimum ATT MTU (23 bytes)
+        effectiveMtu = device.mtu ?? 23;
+      }
+    }
+
+    // Subtract 3 bytes for ATT protocol overhead; clamp to at least 20 bytes
+    return Math.max(20, effectiveMtu - 3);
+  };
 
   const handleStartOnboarding = async (): Promise<void> => {
 
@@ -276,10 +291,11 @@ export default function AddDeviceBLEModal({ user, onClose, onSuccess }: AddDevic
               if (session.cancelled || session.finished || sessionRef.current !== session) return;
 
               const negotiatedDevice = await connectedDevice.requestMTU(512);
-              const chunkSize = negotiatedDevice.mtu;
+              const usableMtu = Math.max(20, (negotiatedDevice.mtu || 23) - 3);
+              const chunkSize = usableMtu;
               // const totalChunks = Math.ceil(jwtToken.length / chunkSize);
               for (let i = 0; i < jwtToken.length; i += chunkSize) {
-                const currentChunkNumber = Math.floor(i / chunkSize) + 1;
+                // const currentChunkNumber = Math.floor(i / chunkSize) + 1;
                 const chunk = jwtToken.slice(i, i + chunkSize);
                 const chunkBase64 = Buffer.from(chunk, 'utf-8').toString('base64');
 

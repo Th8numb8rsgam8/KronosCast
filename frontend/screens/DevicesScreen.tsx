@@ -14,8 +14,8 @@ import mqtt, { MqttClient, IClientOptions } from 'mqtt';
 import AddDeviceBLEModal from './AddDeviceBLEModal';
 import { AuthState, MqttCredentials } from '../types/auth.types';
 import { DeviceItem, DeviceCommand } from '../types/device.types';
-import { ENV } from '../config/env';
 import { apiClient } from '../api/interceptor';
+import { getTemperatureColor } from '../config/device';
 
 const AVAILABLE_COMMANDS: DeviceCommand[] = [
   { label: 'SSNano On', actionValue: 'STREAMSWITCH_ON', buttonColor: '#007AFF' },
@@ -419,9 +419,13 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
     );
   };
 
-  const renderTelemetryData = (telemetryObj: any) => {
-    if (!telemetryObj || typeof telemetryObj !== 'object') {
-      return <Text style={styles.telemetryPlaceholder}>Waiting for telemetry metrics...</Text>;
+  const renderTelemetryData = (telemetryObj: any, isDeviceOnline: boolean) => {
+    if (!isDeviceOnline || !telemetryObj || typeof telemetryObj !== 'object') {
+      return (
+        <Text style={styles.telemetryPlaceholder}>
+          {isDeviceOnline ? 'Waiting for telemetry metrics...' : "Device offline - telemetry cleared."}
+        </Text>
+      );
     }
 
     return (
@@ -432,9 +436,19 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
           const isStsOff = stringVal === 'INACTIVE';
 
           // Determine dynamic color if it's a status metric
-          let valueColor = '#38bdf8'; // Default blue for normal metrics
-          if (isStsOn) valueColor = '#10b981'; // Green for ON
-          if (isStsOff) valueColor = '#ef4444'; // Red for OFF
+          // let valueColor = '#38bdf8'; // Default blue for normal metrics
+          // if (isStsOn) valueColor = '#10b981'; // Green for ON
+          // if (isStsOff) valueColor = '#ef4444'; // Red for OFF
+
+          // 1. Assign valueColor based on metric key or status value
+          let valueColor = '#38bdf8';
+          if (key.toLowerCase() === 'temperature') {
+            valueColor = getTemperatureColor(value);
+          } else if (isStsOn) {
+            valueColor = '#10b981';
+          } else if (isStsOff) {
+            valueColor = '#ef4444';
+          }
 
           return (
             <View key={key} style={styles.telemetryCard}>
@@ -448,6 +462,10 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
       </View>
     );
   };
+
+  const isSelectedDeviceOnline = selectedDevice
+    ? (deviceStatusMap[selectedDevice.id] || 'offline').toLowerCase() === 'online'
+    : false;
 
   return (
     <View style={styles.dashboardContainer}>
@@ -473,7 +491,7 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
         {isConnected ? (
           <Text style={styles.statusConnected}>Connected</Text>
         ) : (
-            <ActivityIndicator size="small" color="#3b82f6" style={{ marginLeft: 6 }} />
+          <ActivityIndicator size="small" color="#3b82f6" style={{ marginLeft: 6 }} />
         )}
       </View>
 
@@ -507,9 +525,8 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
           <Text style={styles.panelSubHeader}>Live Telemetry Metrics</Text>
           <View style={styles.telemetryContainer}>
             {renderTelemetryData(
-              (deviceStatusMap[selectedDevice.id] || 'offline').toLowerCase() === 'online'
-              ? deviceTelemetryMap[selectedDevice.id]
-              : null
+              isSelectedDeviceOnline ? deviceTelemetryMap[selectedDevice.id] : null,
+              isSelectedDeviceOnline
             )}
           </View>
 
@@ -542,6 +559,7 @@ export default function DevicesScreen({ authState, onLogout }: DeviceDashboardPr
     </View>
   );
 }
+
 const styles = StyleSheet.create({
   deviceCard: { 
     backgroundColor: '#121826', 
