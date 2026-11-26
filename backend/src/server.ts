@@ -6,7 +6,7 @@ import https from 'https';
 import http from 'http';
 import fs from 'fs';
 
-import healthRoutes from './routes/health.routes';
+// import healthRoutes from './routes/health.routes';
 import authRoutes from './routes/auth.routes';
 import deviceRoutes from './routes/device.routes';
 import factoryRoutes from './routes/factory.routes';
@@ -18,7 +18,7 @@ import { ENV } from './config/env';
 const publicApp: Application = express();
 publicApp.set('trust proxy', 'uniquelocal'); // Trust the loopback interface for proxy headers
 publicApp.use(express.json());
-publicApp.use('/health', healthRoutes);
+// publicApp.use('/health', healthRoutes);
 publicApp.use('/api/auth', authRoutes);
 publicApp.use('/api/devices', deviceRoutes);
 publicApp.use('/api/factory', factoryRoutes);

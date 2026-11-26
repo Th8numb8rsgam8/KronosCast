@@ -1,0 +1,23 @@
+[Unit]
+Description=Kronos IoT Docker Compose Stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/sentinel/KronosCast/backend
+EnvironmentFile=/home/sentinel/KronosCast/backend/.env
+
+# Pull/build only when starting; use targeted 'docker compose up -d --no-deps <svc>' for live updates
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecReload=/usr/bin/docker compose up -d --remove-orphans
+ExecStop=/usr/bin/docker compose down
+
+TimeoutStartSec=300
+TimeoutStopSec=120
+KillMode=none
+
+[Install]
+WantedBy=multi-user.target
